@@ -1,0 +1,11 @@
+[package]
+name = "idunn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+apple-signin = "0.2.0"
+arc-swap = "1.9.2"
+# TODO: reqwest 0.12 is an old version, it's here because apple-signin depends on it
+reqwest = "0.12"
+thiserror = "2.0.20"
