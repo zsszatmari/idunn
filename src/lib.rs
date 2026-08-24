@@ -3,18 +3,18 @@
 // https://developer.apple.com/support/offering-account-deletion-in-your-app/
 
 mod error;
-mod identity;
+mod identity_verification;
+mod jwks_store;
 #[cfg(test)]
 mod test_support;
-mod token;
+mod token_exchange;
+mod transport;
 
 pub use error::IdunnError;
-pub use identity::AppleIdentity;
-pub use token::{
-    AppleTokenConfig, AppleTokenResponse, HttpTransport, ReqwestTransport, TransportError,
-};
+pub use identity_verification::AppleIdentity;
+pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
+use transport::HttpTransport;
 
-use apple_signin::AppleJwtClient;
 use jsonwebtoken::EncodingKey;
 
 ///Verifies Apple identity tokens and exchanges authorization codes for refresh
@@ -28,19 +28,23 @@ use jsonwebtoken::EncodingKey;
 /// but keep in mind that there might be inner state going on, for example in-flight key
 /// refreshes
 //#[derive(Clone)]
-pub struct AppleAuthClient<T: HttpTransport = ReqwestTransport> {
+pub struct AppleAuthClient<T: HttpTransport = transport::ReqwestTransport> {
     apple_jwt: AppleJwtClient,
     token_config: AppleTokenConfig,
     signing_key: EncodingKey,
     transport: T,
 }
 
-impl AppleAuthClient<ReqwestTransport> {
+impl AppleAuthClient<transport::ReqwestTransport> {
     pub fn new<S: AsRef<str>>(
         bundle_ids: &[S],
         token_config: AppleTokenConfig,
     ) -> Result<Self, IdunnError> {
-        Self::with_transport(bundle_ids, token_config, ReqwestTransport::default())
+        Self::with_transport(
+            bundle_ids,
+            token_config,
+            transport::ReqwestTransport::default(),
+        )
     }
 }
 
@@ -72,7 +76,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         &self,
         authorization_code: &str,
     ) -> Result<AppleTokenResponse, IdunnError> {
-        token::exchange_authorization_code(
+        token_exchange::exchange_authorization_code(
             &self.transport,
             &self.token_config,
             &self.signing_key,

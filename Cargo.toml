@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-apple-signin = "0.2.0"
 arc-swap = "1.9.2"
-jsonwebtoken = "10.4.0"
-# TODO: reqwest 0.12 is an old version, it's here because apple-signin depends on it
-reqwest = "0.12"
+async-lock = "3.4.2"
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+reqwest = "0.13"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"

@@ -1,4 +1,4 @@
-use crate::token::AppleTokenConfig;
+use crate::token_exchange::AppleTokenConfig;
 
 pub(crate) const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQggeco4/EEIM9ovqMW\n\
