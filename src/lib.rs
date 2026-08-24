@@ -10,7 +10,7 @@ mod test_support;
 mod token_exchange;
 mod transport;
 
-pub use error::IdunnError;
+pub use error::{IdunnError, InvalidTokenCause};
 pub use identity_verification::AppleIdentity;
 pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
 use transport::HttpTransport;
@@ -29,7 +29,6 @@ use jsonwebtoken::EncodingKey;
 /// refreshes
 //#[derive(Clone)]
 pub struct AppleAuthClient<T: HttpTransport = transport::ReqwestTransport> {
-    apple_jwt: AppleJwtClient,
     token_config: AppleTokenConfig,
     signing_key: EncodingKey,
     transport: T,
@@ -68,6 +67,10 @@ impl<T: HttpTransport> AppleAuthClient<T> {
             signing_key,
             transport,
         })
+    }
+
+    pub async fn refresh_keystore(&self) -> Result<(), IdunnError> {
+        // TODO: to be implemented
     }
 
     /// Exchange an authorization code (from `ASAuthorizationAppleIDCredential`)
