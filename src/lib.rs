@@ -12,6 +12,7 @@ mod transport;
 
 pub use error::{IdunnError, InvalidTokenCause};
 pub use identity_verification::AppleIdentity;
+pub use jwks_store::JwksStoreConfig;
 pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
 use transport::HttpTransport;
 
@@ -29,6 +30,7 @@ use jsonwebtoken::EncodingKey;
 /// refreshes
 //#[derive(Clone)]
 pub struct AppleAuthClient<T: HttpTransport = transport::ReqwestTransport> {
+    identity_verification: identity_verification::IdentityVerificationClient<T>,
     token_config: AppleTokenConfig,
     signing_key: EncodingKey,
     transport: T,
@@ -43,6 +45,7 @@ impl AppleAuthClient<transport::ReqwestTransport> {
             bundle_ids,
             token_config,
             transport::ReqwestTransport::default(),
+            JwksStoreConfig::default(),
         )
     }
 }
@@ -52,17 +55,17 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         bundle_ids: &[S],
         token_config: AppleTokenConfig,
         transport: T,
+        jwks_config: JwksStoreConfig,
     ) -> Result<Self, IdunnError> {
         let signing_key = EncodingKey::from_ec_pem(&token_config.private_key_pem)
             .map_err(IdunnError::InvalidPrivateKey)?;
-        let bundle_ids: Vec<String> = bundle_ids
-            .iter()
-            .map(|id| id.as_ref().to_string())
-            .collect();
+        let identity_verification = identity_verification::IdentityVerificationClient::new(
+            bundle_ids,
+            transport.clone(),
+            jwks_config,
+        );
         Ok(Self {
-            // TODO: there is a serious bug in AppleJwtClient regarding JWKS cache causing frequent trips to Apple
-            // under heavy load. Either fix it or implement our own JWT checking (probably the latter but TBD)
-            apple_jwt: AppleJwtClient::new(&bundle_ids),
+            identity_verification,
             token_config,
             signing_key,
             transport,
@@ -70,7 +73,8 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     }
 
     pub async fn refresh_keystore(&self) -> Result<(), IdunnError> {
-        // TODO: to be implemented
+        self.identity_verification.refresh_keystore().await;
+        Ok(())
     }
 
     /// Exchange an authorization code (from `ASAuthorizationAppleIDCredential`)

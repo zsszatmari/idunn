@@ -1,11 +1,10 @@
-use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::error::IdunnError;
+use crate::transport::{HttpTransport, TransportError, encode_form};
 
 const TOKEN_URL: &str = "https://appleid.apple.com/auth/token";
 /// Client secret is minted fresh for each request, so it only needs to live

@@ -91,8 +91,8 @@ impl HttpTransport for ReqwestTransport {
         body: &str,
         timeout: Duration,
     ) -> Result<String, TransportError> {
-        let request = Self::with_headers(self.0.post(url).body(body.to_string()), headers)
-            .timeout(timeout);
+        let request =
+            Self::with_headers(self.0.post(url).body(body.to_string()), headers).timeout(timeout);
         Self::send(request).await
     }
 
@@ -107,7 +107,7 @@ impl HttpTransport for ReqwestTransport {
     }
 }
 
-fn encode_form(pairs: &[(&str, &str)]) -> String {
+pub(crate) fn encode_form(pairs: &[(&str, &str)]) -> String {
     url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(pairs)
         .finish()

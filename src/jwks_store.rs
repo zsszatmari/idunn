@@ -15,7 +15,7 @@ const JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
-pub(crate) struct JwksStoreConfig {
+pub struct JwksStoreConfig {
     /// How long a successful fetch stays "fresh" before `get_key`'s lazy path
     /// tries again, even if every requested kid is still present — protects
     /// against holding a key Apple has since revoked. Not a hard expiry: a
@@ -88,7 +88,7 @@ impl<T: HttpTransport> JwksStore<T> {
                 // know).
                 if cached.fetched_at.elapsed() < self.config.refresh_interval {
                     Err(IdunnError::InvalidToken(InvalidTokenCause::InvalidKeyId {
-                        kid: kid.to_string(),
+                        kid: Some(kid.to_string()),
                     }))
                 } else {
                     Err(IdunnError::CannotVerifyToken)
@@ -205,8 +205,9 @@ mod tests {
             Self::sequence(vec![Err(err)])
         }
 
-        /// Each call in turn consumes the next response; the last response
-        /// repeats once the sequence is exhausted.
+        /// Each call in turn consumes the next response, in order. Panics if
+        /// the sequence is exhausted — a test that wants the same response
+        /// more than once must list it that many times.
         fn sequence(responses: Vec<Result<String, TransportError>>) -> Self {
             Self {
                 calls: Arc::default(),
@@ -238,20 +239,10 @@ mod tests {
         ) -> Result<String, TransportError> {
             self.calls.lock().unwrap().push(url.to_string());
             let mut responses = self.responses.lock().unwrap();
-            let response = if responses.len() > 1 {
-                responses.remove(0)
-            } else {
-                match responses.first() {
-                    Some(Ok(body)) => Ok(body.clone()),
-                    Some(Err(TransportError::Http { status, body })) => Err(TransportError::Http {
-                        status: *status,
-                        body: body.clone(),
-                    }),
-                    Some(Err(_)) => panic!("unsupported error variant in test fake"),
-                    None => panic!("no response configured"),
-                }
-            };
-            response
+            if responses.is_empty() {
+                panic!("no response configured");
+            }
+            responses.remove(0)
         }
     }
 
@@ -422,7 +413,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(IdunnError::InvalidToken(InvalidTokenCause::InvalidKeyId { kid }))
-                if kid == "does-not-exist"
+                if kid.as_deref() == Some("does-not-exist")
         ));
     }
 

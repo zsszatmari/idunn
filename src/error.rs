@@ -32,8 +32,15 @@ pub enum IdunnError {
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum InvalidTokenCause {
-    /// The token's `kid` isn't in Apple's currently published (successfully
-    /// fetched, fresh) key set.
-    #[error("key id {kid:?} not found in Apple's published key set")]
-    InvalidKeyId { kid: String },
+    /// The token's `kid` is missing from its header, or isn't in Apple's
+    /// currently published (successfully fetched, fresh) key set.
+    #[error("Apple identity token key id {kid:?} not found in Apple's published key set")]
+    InvalidKeyId { kid: Option<String> },
+    /// `jsonwebtoken` rejected the token outright — malformed header, bad
+    /// signature, or a claim (issuer/audience/expiry) it doesn't satisfy.
+    #[error("Apple identity token failed verification: {0}")]
+    Rejected(jsonwebtoken::errors::Error),
+    /// Header declares an algorithm other than the RS256 Apple actually uses.
+    #[error("Apple identity token uses algorithm {0:?} instead of the expected RS256")]
+    AlgorithmMismatch(jsonwebtoken::Algorithm),
 }
