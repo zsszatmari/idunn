@@ -368,4 +368,78 @@ yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
             ))
         ));
     }
+
+    /// Hits Apple's real `/auth/revoke` endpoint with an unknown, clearly-marked-as-test
+    /// refresh token. Per Apple's docs, revoke is idempotent for anti-enumeration
+    /// reasons: it returns 200 with no body both on a real revocation and when the
+    /// token was already invalid/unknown — so this only confirms live connectivity and
+    /// request shape, not error parsing (see the sibling test below for that). Not
+    /// `#[ignore]`d — it needs network access, which this development sandbox's Bash
+    /// tool doesn't have, so it couldn't be run/verified while writing it; it still
+    /// runs under a normal `cargo test` for anyone with network access (e.g. CI).
+    ///
+    /// To see the exact bytes sent/received on the wire, run with:
+    /// `RUST_LOG=reqwest=trace cargo test real_apple_revoke_endpoint -- --nocapture`
+    /// (uses reqwest's own built-in `connection_verbose` wire logging, not a custom dump).
+    #[tokio::test]
+    async fn real_apple_revoke_endpoint_is_idempotent_for_an_unknown_token() {
+        let _ = env_logger::try_init();
+        let config = test_config();
+        let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
+        let client = reqwest::Client::builder()
+            .connection_verbose(true)
+            .build()
+            .unwrap();
+        let transport = crate::transport::ReqwestTransport::with_client(client);
+
+        let result =
+            revoke_refresh_token(&transport, &config, &signing_key, "idunn-test-token").await;
+
+        assert!(result.is_ok(), "expected Ok(()), got {result:?}");
+    }
+
+    /// Hits Apple's real `/auth/revoke` endpoint with `client_secret` omitted entirely,
+    /// to confirm `AppleErrorCode::from_response_body` actually recognizes the error
+    /// shape Apple returns in production for a malformed request (not just the shape we
+    /// assume in the fakes above). A bad token isn't reliable for this (see the sibling
+    /// test above — Apple treats an unknown token as a no-op success), and empirically
+    /// neither is a present-but-garbage `client_secret` (Apple accepted
+    /// `"not-a-valid-jwt"` as one with a 200); a genuinely *missing* required parameter
+    /// is Apple's documented `invalid_request` trigger, so this targets that instead.
+    #[tokio::test]
+    async fn real_apple_revoke_endpoint_rejects_a_missing_client_secret() {
+        let _ = env_logger::try_init();
+        let client = reqwest::Client::builder()
+            .connection_verbose(true)
+            .build()
+            .unwrap();
+        let transport = crate::transport::ReqwestTransport::with_client(client);
+
+        let form = [
+            ("client_id", "com.example.myapp"),
+            ("token", "idunn-test-token"),
+            ("token_type_hint", "refresh_token"),
+        ];
+        let encoded_body = encode_form(&form);
+
+        let result = transport
+            .post_form(
+                REVOKE_URL,
+                &[("Content-Type", "application/x-www-form-urlencoded")],
+                &encoded_body,
+                REQUEST_TIMEOUT,
+            )
+            .await;
+
+        match result {
+            Err(TransportError::Http { body, .. }) => {
+                let code = AppleErrorCode::from_response_body(body);
+                assert!(
+                    matches!(code, AppleErrorCode::InvalidClient),
+                    "expected invalid_client from Apple, got {code:?}"
+                );
+            }
+            other => panic!("expected an HTTP error response, got {other:?}"),
+        }
+    }
 }

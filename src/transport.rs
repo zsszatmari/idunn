@@ -53,6 +53,13 @@ pub trait HttpTransport: Clone + Send + Sync + 'static {
 pub struct ReqwestTransport(reqwest::Client);
 
 impl ReqwestTransport {
+    /// Wraps a caller-configured `reqwest::Client` — e.g. one built with
+    /// `.connection_verbose(true)` for wire-level debugging.
+    #[cfg(test)]
+    pub(crate) fn with_client(client: reqwest::Client) -> Self {
+        Self(client)
+    }
+
     fn with_headers(
         mut request: reqwest::RequestBuilder,
         headers: &[(&str, &str)],

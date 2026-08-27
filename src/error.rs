@@ -109,11 +109,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_known_error_codes() {
-        assert_eq!(
-            AppleErrorCode::from_response_body(r#"{"error":"invalid_grant"}"#.to_string()),
-            AppleErrorCode::InvalidGrant
-        );
+    fn parses_all_documented_error_codes() {
+        let cases = [
+            ("invalid_request", AppleErrorCode::InvalidRequest),
+            ("invalid_client", AppleErrorCode::InvalidClient),
+            ("invalid_grant", AppleErrorCode::InvalidGrant),
+            ("unauthorized_client", AppleErrorCode::UnauthorizedClient),
+            (
+                "unsupported_grant_type",
+                AppleErrorCode::UnsupportedGrantType,
+            ),
+            ("invalid_scope", AppleErrorCode::InvalidScope),
+        ];
+        for (raw, expected) in cases {
+            let body = format!(r#"{{"error":"{raw}"}}"#);
+            assert_eq!(AppleErrorCode::from_response_body(body), expected);
+        }
     }
 
     #[test]
