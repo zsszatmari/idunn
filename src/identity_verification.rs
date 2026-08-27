@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-
-use crate::AppleAuthClient;
 use crate::error::{IdunnError, InvalidTokenCause};
 use crate::jwks_store::{JwksStore, JwksStoreConfig};
 use crate::transport::HttpTransport;
@@ -31,18 +28,6 @@ struct ApplePayload {
 pub(crate) struct IdentityVerificationClient<T: HttpTransport> {
     jwks_store: JwksStore<T>,
     validation: Validation,
-}
-
-impl<T: HttpTransport> AppleAuthClient<T> {
-    /// Validate and decode an Apple identity JWT.
-    pub async fn verify_identity_token(
-        &self,
-        identity_token: &str,
-    ) -> Result<AppleIdentity, IdunnError> {
-        self.identity_verification
-            .verify_identity_token(identity_token)
-            .await
-    }
 }
 
 impl<T: HttpTransport> IdentityVerificationClient<T> {

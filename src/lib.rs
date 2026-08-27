@@ -12,8 +12,8 @@ mod transport;
 
 pub use error::{IdunnError, InvalidTokenCause};
 pub use identity_verification::AppleIdentity;
-pub use jwks_store::JwksStoreConfig;
 pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
+use jwks_store::JwksStoreConfig;
 use transport::HttpTransport;
 
 use jsonwebtoken::EncodingKey;
@@ -75,6 +75,16 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     pub async fn refresh_keystore(&self) -> Result<(), IdunnError> {
         self.identity_verification.refresh_keystore().await;
         Ok(())
+    }
+
+    /// Validate and decode an Apple identity JWT.
+    pub async fn verify_identity_token(
+        &self,
+        identity_token: &str,
+    ) -> Result<AppleIdentity, IdunnError> {
+        self.identity_verification
+            .verify_identity_token(identity_token)
+            .await
     }
 
     /// Exchange an authorization code (from `ASAuthorizationAppleIDCredential`)
