@@ -17,12 +17,25 @@ pub enum TransportError {
     Http { status: u16, body: String },
 }
 
-/// Abstraction over the HTTP requests needed to talk to Apple's token endpoints.
-/// Exists so the transport is swappable (idunn consumers may prefer a differently
-/// configured or non-reqwest client) and so tests can substitute an in-memory fake
-/// instead of hitting the network.
-/// TODO: use this in AppleAuthClient as well
-pub trait HttpTransport: Clone + Send + Sync + 'static {
+/// Abstraction over GET requests needed to talk to Apple's endpoints (currently just
+/// JWKS fetching). Split out from `HttpPostForm` so read-only call sites can bound on
+/// this alone, instead of requiring a `post_form` implementation they'd never call.
+pub trait HttpGet: Clone + Send + Sync + 'static {
+    /// GETs a resource, returning the response body on success (2xx) or a
+    /// `TransportError` on failure. No body is sent; `headers` and `timeout` are
+    /// mandatory — callers must decide how long they're willing to wait, there is no
+    /// implicit default.
+    fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        timeout: Duration,
+    ) -> impl Future<Output = Result<String, TransportError>> + Send;
+}
+
+/// Abstraction over POST-form requests needed to talk to Apple's token endpoints.
+/// Split out from `HttpGet` so write-only call sites can bound on this alone.
+pub trait HttpPost: Clone + Send + Sync + 'static {
     /// POSTs a body, returning the response body on success (2xx) or a `TransportError`
     /// (network failure, or the raw status/body on non-2xx). `body` is already
     /// url-encoded by idunn — implementors just need to send it, not assemble it
@@ -37,17 +50,15 @@ pub trait HttpTransport: Clone + Send + Sync + 'static {
         body: &str,
         timeout: Duration,
     ) -> impl Future<Output = Result<String, TransportError>> + Send;
-
-    /// GETs a resource, returning the response body on success (2xx) or a
-    /// `TransportError` on failure. No body is sent; `headers` and `timeout` are
-    /// handled as given, same as `post_form`.
-    fn get(
-        &self,
-        url: &str,
-        headers: &[(&str, &str)],
-        timeout: Duration,
-    ) -> impl Future<Output = Result<String, TransportError>> + Send;
 }
+
+/// Combined GET + POST-form capability. Exists so the transport is swappable (idunn
+/// consumers may prefer a differently configured or non-reqwest client) and so tests
+/// can substitute an in-memory fake instead of hitting the network. Implemented
+/// automatically for any type that has both `HttpGet` and `HttpPostForm` — implement
+/// those two traits, not this one, directly.
+pub trait HttpTransport: HttpGet + HttpPost {}
+impl<T: HttpGet + HttpPost> HttpTransport for T {}
 
 #[derive(Clone, Default)]
 pub struct ReqwestTransport(reqwest::Client);
@@ -90,7 +101,7 @@ impl ReqwestTransport {
     }
 }
 
-impl HttpTransport for ReqwestTransport {
+impl HttpPost for ReqwestTransport {
     async fn post_form(
         &self,
         url: &str,
@@ -102,7 +113,9 @@ impl HttpTransport for ReqwestTransport {
             Self::with_headers(self.0.post(url).body(body.to_string()), headers).timeout(timeout);
         Self::send(request).await
     }
+}
 
+impl HttpGet for ReqwestTransport {
     async fn get(
         &self,
         url: &str,

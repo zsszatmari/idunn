@@ -7,7 +7,7 @@ use jsonwebtoken::DecodingKey;
 use jsonwebtoken::jwk::JwkSet;
 
 use crate::error::{IdunnError, InvalidTokenCause};
-use crate::transport::{HttpTransport, TransportError};
+use crate::transport::{HttpGet, TransportError};
 
 const JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
 // TODO: make this configurable through the public API instead of hardcoding it here
@@ -59,7 +59,7 @@ impl CachedKeys {
     }
 }
 
-pub(crate) struct JwksStore<T: HttpTransport> {
+pub(crate) struct JwksStore<T: HttpGet> {
     key_set: ArcSwapOption<CachedKeys>,
     transport: T,
     // Guards fetch attempts *and* records when the last attempt (success or
@@ -69,7 +69,7 @@ pub(crate) struct JwksStore<T: HttpTransport> {
     config: JwksStoreConfig,
 }
 
-impl<T: HttpTransport> JwksStore<T> {
+impl<T: HttpGet> JwksStore<T> {
     pub fn new(transport: T, config: JwksStoreConfig) -> Self {
         Self {
             key_set: ArcSwapOption::empty(),
@@ -233,17 +233,7 @@ mod tests {
         }
     }
 
-    impl HttpTransport for MockTransport {
-        async fn post_form(
-            &self,
-            _url: &str,
-            _headers: &[(&str, &str)],
-            _body: &str,
-            _timeout: Duration,
-        ) -> Result<String, TransportError> {
-            unimplemented!("JwksStore only issues GET requests")
-        }
-
+    impl HttpGet for MockTransport {
         async fn get(
             &self,
             url: &str,

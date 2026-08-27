@@ -4,7 +4,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppleErrorCode, IdunnError};
-use crate::transport::{HttpTransport, TransportError, encode_form};
+use crate::transport::{HttpPost, TransportError, encode_form};
 
 const TOKEN_URL: &str = "https://appleid.apple.com/auth/token";
 const REVOKE_URL: &str = "https://appleid.apple.com/auth/revoke";
@@ -78,7 +78,7 @@ pub fn build_client_secret(
         .map_err(IdunnError::ClientSecretSigningFailed)
 }
 
-pub async fn exchange_authorization_code<T: HttpTransport>(
+pub async fn exchange_authorization_code<T: HttpPost>(
     transport: &T,
     config: &AppleTokenConfig,
     signing_key: &EncodingKey,
@@ -119,7 +119,7 @@ pub async fn exchange_authorization_code<T: HttpTransport>(
 /// Revoke a refresh token previously issued by Apple (e.g. on sign-out or account
 /// deletion) so it can no longer be used.
 /// https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
-pub async fn revoke_refresh_token<T: HttpTransport>(
+pub async fn revoke_refresh_token<T: HttpPost>(
     transport: &T,
     config: &AppleTokenConfig,
     signing_key: &EncodingKey,
@@ -230,7 +230,7 @@ yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
         }
     }
 
-    impl HttpTransport for FakeTransport {
+    impl HttpPost for FakeTransport {
         async fn post_form(
             &self,
             url: &str,
@@ -242,19 +242,6 @@ yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
                 .lock()
                 .unwrap()
                 .push((url.to_string(), body.to_string()));
-            self.respond()
-        }
-
-        async fn get(
-            &self,
-            url: &str,
-            _headers: &[(&str, &str)],
-            _timeout: Duration,
-        ) -> Result<String, TransportError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((url.to_string(), String::new()));
             self.respond()
         }
     }

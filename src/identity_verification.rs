@@ -1,6 +1,6 @@
 use crate::error::{IdunnError, InvalidTokenCause};
 use crate::jwks_store::{JwksStore, JwksStoreConfig};
-use crate::transport::HttpTransport;
+use crate::transport::HttpGet;
 use jsonwebtoken::Validation;
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -65,13 +65,13 @@ struct ApplePayload {
     exp: u64,
 }
 
-pub(crate) struct IdentityVerificationClient<T: HttpTransport> {
+pub(crate) struct IdentityVerificationClient<T: HttpGet> {
     jwks_store: JwksStore<T>,
     validation: Validation,
     config: IdentityVerificationConfig,
 }
 
-impl<T: HttpTransport> IdentityVerificationClient<T> {
+impl<T: HttpGet> IdentityVerificationClient<T> {
     pub(crate) fn new<S: AsRef<str>>(
         bundle_ids: &[S],
         transport: T,
@@ -236,17 +236,7 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
         }
     }
 
-    impl HttpTransport for MockTransport {
-        async fn post_form(
-            &self,
-            _url: &str,
-            _headers: &[(&str, &str)],
-            _body: &str,
-            _timeout: Duration,
-        ) -> Result<String, TransportError> {
-            unimplemented!("identity verification only issues GET requests, via jwks_store")
-        }
-
+    impl HttpGet for MockTransport {
         async fn get(
             &self,
             _url: &str,
