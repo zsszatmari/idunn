@@ -45,6 +45,20 @@ struct CachedKeys {
     fetched_at: Instant,
 }
 
+impl CachedKeys {
+    fn jwk_set_to_keymap(jwk_set: &JwkSet) -> HashMap<String, DecodingKey> {
+        jwk_set
+            .keys
+            .iter()
+            .filter_map(|jwk| {
+                let key_id = jwk.common.key_id.clone()?;
+                let decoding_key = DecodingKey::from_jwk(jwk).ok()?;
+                Some((key_id, decoding_key))
+            })
+            .collect()
+    }
+}
+
 pub(crate) struct JwksStore<T: HttpTransport> {
     key_set: ArcSwapOption<CachedKeys>,
     transport: T,
@@ -179,17 +193,7 @@ impl<T: HttpTransport> JwksStore<T> {
             }
         };
 
-        Some(
-            jwk_set
-                .keys
-                .iter()
-                .filter_map(|jwk| {
-                    let key_id = jwk.common.key_id.clone()?;
-                    let decoding_key = DecodingKey::from_jwk(jwk).ok()?;
-                    Some((key_id, decoding_key))
-                })
-                .collect(),
-        )
+        Some(CachedKeys::jwk_set_to_keymap(&jwk_set))
     }
 }
 
@@ -459,5 +463,20 @@ mod tests {
 
         assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn real_apple_refresh() {
+        let transport = crate::transport::ReqwestTransport::default();
+        let result = transport.get(JWKS_URL, &[], REQUEST_TIMEOUT).await;
+
+        match result {
+            Ok(response) => {
+                let jwks: JwkSet = serde_json::from_slice(&response.as_bytes()).unwrap();
+                let jwk_map: HashMap<String, DecodingKey> = CachedKeys::jwk_set_to_keymap(&jwks);
+                assert!(jwk_map.keys().len() > 0);
+            }
+            other => panic!("expected an HTTP error response, got {other:?}"),
+        }
     }
 }

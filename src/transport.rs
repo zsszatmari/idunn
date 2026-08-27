@@ -119,3 +119,20 @@ pub(crate) fn encode_form(pairs: &[(&str, &str)]) -> String {
         .extend_pairs(pairs)
         .finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn send_returns_network_error_when_request_fails() {
+        let client = reqwest::Client::new();
+        let transport = ReqwestTransport::with_client(client);
+
+        let result = transport
+            .get("http://127.0.0.1:1", &[], Duration::from_secs(1))
+            .await;
+
+        assert!(matches!(result, Err(TransportError::Network(_))));
+    }
+}
