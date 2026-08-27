@@ -72,17 +72,12 @@ pub(crate) struct IdentityVerificationClient<T: HttpGet> {
 }
 
 impl<T: HttpGet> IdentityVerificationClient<T> {
-    pub(crate) fn new<S: AsRef<str>>(
-        bundle_ids: &[S],
+    pub(crate) fn new(
+        client_id: &str,
         transport: T,
         jwks_config: JwksStoreConfig,
         config: IdentityVerificationConfig,
     ) -> Self {
-        let bundle_ids: Vec<String> = bundle_ids
-            .iter()
-            .map(|id| id.as_ref().to_string())
-            .collect();
-
         // https://developer.apple.com/documentation/signinwithapple/verifying-a-user
         //
         // steps needed to validate the identity token:
@@ -109,7 +104,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
         // "3. Verify that the iss field contains https://appleid.apple.com"
         validation.set_issuer(&["https://appleid.apple.com"]);
         // "4. Verify that the aud field is the developer's client_id"
-        validation.set_audience(&bundle_ids);
+        validation.set_audience(&[client_id]);
         validation.validate_aud = true;
         // "5. Verify that the time is earlier than the exp value of the" token
         validation.validate_exp = true;
@@ -320,7 +315,7 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
         config: IdentityVerificationConfig,
     ) -> IdentityVerificationClient<MockTransport> {
         IdentityVerificationClient::new(
-            &[TEST_BUNDLE_ID],
+            TEST_BUNDLE_ID,
             transport,
             JwksStoreConfig::default(),
             config,

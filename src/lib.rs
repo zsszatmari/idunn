@@ -19,7 +19,7 @@ use transport::HttpTransport;
 use jsonwebtoken::EncodingKey;
 
 ///Verifies Apple identity tokens and exchanges authorization codes for refresh
-/// tokens, for a set of app bundle ids.
+/// tokens, for a single app identified by `AppleTokenConfig::client_id`.
 ///
 /// One client with one constructor, covering both identity verification and token
 /// exchange even though they touch mostly-disjoint code (see `identity.rs` /
@@ -38,12 +38,8 @@ pub struct AppleAuthClient<T: HttpTransport> {
 
 #[cfg(feature = "reqwest")]
 impl AppleAuthClient<transport::ReqwestTransport> {
-    pub fn new<S: AsRef<str>>(
-        bundle_ids: &[S],
-        token_config: AppleTokenConfig,
-    ) -> Result<Self, IdunnError> {
+    pub fn new(token_config: AppleTokenConfig) -> Result<Self, IdunnError> {
         Self::with_transport(
-            bundle_ids,
             token_config,
             transport::ReqwestTransport::default(),
             JwksStoreConfig::default(),
@@ -53,8 +49,7 @@ impl AppleAuthClient<transport::ReqwestTransport> {
 }
 
 impl<T: HttpTransport> AppleAuthClient<T> {
-    pub fn with_transport<S: AsRef<str>>(
-        bundle_ids: &[S],
+    pub fn with_transport(
         token_config: AppleTokenConfig,
         transport: T,
         jwks_config: JwksStoreConfig,
@@ -63,7 +58,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         let signing_key = EncodingKey::from_ec_pem(&token_config.private_key_pem)
             .map_err(IdunnError::InvalidPrivateKey)?;
         let identity_verification = identity_verification::IdentityVerificationClient::new(
-            bundle_ids,
+            &token_config.client_id,
             transport.clone(),
             jwks_config,
             identity_verification_config,
@@ -125,8 +120,8 @@ mod tests {
     use crate::test_support::test_token_config;
 
     #[test]
-    fn constructs_client_with_bundle_ids_and_token_config() {
-        let _client = AppleAuthClient::new(&["com.example.myapp"], test_token_config())
+    fn constructs_client_from_token_config() {
+        let _client = AppleAuthClient::new(test_token_config())
             .expect("valid test key should construct client");
     }
 
@@ -135,7 +130,7 @@ mod tests {
         let mut config = test_token_config();
         config.private_key_pem = b"not a key".to_vec();
 
-        let result = AppleAuthClient::new(&["com.example.myapp"], config);
+        let result = AppleAuthClient::new(config);
 
         assert!(matches!(result, Err(IdunnError::InvalidPrivateKey(_))));
     }

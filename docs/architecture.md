@@ -6,12 +6,16 @@ TODO: ezt at kell neznem szemelyesen majd
 
 `idunn` does two things for Sign in with Apple:
 
-1. **Verify identity tokens** (`AppleIdentity`, `verify_identity_token`, `src/identity_verification.rs`) — needs only the app's bundle id(s), checked against Apple's own published keys via idunn's own `JwksStore` and `jsonwebtoken`-based verification.
+1. **Verify identity tokens** (`AppleIdentity`, `verify_identity_token`, `src/identity_verification.rs`) — needs only the app's `client_id` (`AppleTokenConfig::client_id`), checked against Apple's own published keys via idunn's own `JwksStore` and `jsonwebtoken`-based verification.
 2. **Exchange an authorization code for tokens** (`AppleTokenResponse`, `exchange_authorization_code`, `src/token_exchange.rs`) — needs a signed JWT client secret, which requires `team_id`, `key_id`, `client_id` and Apple's private key (`.p8`).
 
 These two features barely touch the same code, which is why they live in separate submodules. They are nonetheless exposed through a single `AppleAuthClient` with a single constructor, rather than two independent client types, for one reason: **Apple requires apps to support account-deletion / token-revocation** (see [TN3194](https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple) and the [revoke-tokens REST API](https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens), both linked at the top of `src/lib.rs`). Revocation needs the very refresh token this feature fetches, plus the same client-secret-signing credentials as the exchange call.
 
 If verification and token exchange were separate client types, it would be possible to wire up a working sign-in flow that can never revoke a token — an app that's compliant on day one but silently unable to meet Apple's mandatory requirement later. A single constructor that requires all the credentials up front makes that state unreachable: correct usage (a fully-configured client) is the only usage. Token revocation itself isn't implemented yet — this constructor shape is what lets it be added later without changing any caller's configuration.
+
+## Why identity verification and token exchange share one `client_id`
+
+Identity-token verification and token exchange used to take independently configurable identifiers: a `bundle_ids` slice passed into the constructor for verification's `aud` check, and `AppleTokenConfig::client_id` for signing the client secret used in exchange. Apple's own docs specify that an identity token's `aud` is always the developer's client_id — the same value already required for the client secret — so the two were never actually independent, just accidentally duplicated. `AppleTokenConfig::client_id` is now the single source for both, which also removes the possibility of the two silently drifting out of sync.
 
 ## Why the HTTP transport is injectable
 

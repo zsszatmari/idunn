@@ -19,12 +19,18 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// client_id are all opaque strings and easy to transpose otherwise.
 #[derive(Clone)]
 pub struct AppleTokenConfig {
+    /// The issuer registered claim identifies the principal that issued the client secret.
+    /// Because the client secret belongs to your developer team, use the 10-character
+    /// Team ID associated with your developer account.
     pub team_id: String,
     /// Apple: "A 10-character key identifier generated for the Account and Organizational Data
     /// Sharing private key associated with your developer account.
     pub key_id: String,
     /// Apple: "The identifier (App ID or Services ID) for your app. To help prevent the possibility of exposing sensitive
     /// data to the end user, the identifier must not include your Team ID."
+    /// Also the expected `aud` claim on identity tokens passed to `verify_identity_token` —
+    /// Apple's docs specify the identity token's audience is always the developer's client_id,
+    /// so this one field drives both token exchange and identity verification.
     pub client_id: String,
     /// PEM-encoded PKCS#8 EC private key (the .p8 file Apple provides), as bytes.
     pub private_key_pem: Vec<u8>,
