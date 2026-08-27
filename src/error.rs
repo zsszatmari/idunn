@@ -21,7 +21,9 @@ pub enum IdunnError {
     #[error("failed to sign client secret: {0}")]
     ClientSecretSigningFailed(jsonwebtoken::errors::Error),
     #[error("Apple token endpoint returned an error: {0}")]
-    TokenExchangeFailed(String),
+    TokenExchangeFailed(AppleErrorCode),
+    #[error("Apple revoke endpoint returned an error: {0}")]
+    TokenRevocationFailed(AppleErrorCode),
     #[error("could not parse Apple token response: {0}")]
     InvalidTokenResponse(serde_json::Error),
 }
@@ -49,4 +51,86 @@ pub enum InvalidTokenCause {
     /// token's `nonce_supported` claim was `true`.
     #[error("Apple identity token carries no nonce claim, which the configured nonce policy requires")]
     MissingNonce,
+}
+
+/// Apple's documented `ErrorResponse.error` codes.
+/// https://developer.apple.com/documentation/signinwithapplerestapi/errorresponse
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AppleErrorCode {
+    #[error("invalid_request: the request is malformed")]
+    InvalidRequest,
+    #[error("invalid_client: client authentication failed")]
+    InvalidClient,
+    #[error("invalid_grant: the authorization grant or refresh token is invalid")]
+    InvalidGrant,
+    #[error(
+        "unauthorized_client: the client isn't authorized to use this authorization grant type"
+    )]
+    UnauthorizedClient,
+    #[error(
+        "unsupported_grant_type: the authenticated client isn't authorized to use this grant type"
+    )]
+    UnsupportedGrantType,
+    #[error("invalid_scope: the requested scope is invalid")]
+    InvalidScope,
+    /// The response body didn't parse as `ErrorResponse`, or its `error` value
+    /// isn't one of Apple's documented codes. Carries the raw response body.
+    #[error("unrecognized Apple error response: {0}")]
+    UnknownError(String),
+}
+
+impl AppleErrorCode {
+    /// Parses a raw HTTP error body from Apple's token/revoke endpoints into a
+    /// typed code, falling back to `UnknownError` (holding the raw body) if it
+    /// doesn't parse as `{"error": "..."}` or the code isn't one Apple documents.
+    pub(crate) fn from_response_body(body: String) -> Self {
+        #[derive(serde::Deserialize)]
+        struct RawErrorResponse {
+            error: String,
+        }
+        let Ok(raw) = serde_json::from_str::<RawErrorResponse>(&body) else {
+            return AppleErrorCode::UnknownError(body);
+        };
+        match raw.error.as_str() {
+            "invalid_request" => AppleErrorCode::InvalidRequest,
+            "invalid_client" => AppleErrorCode::InvalidClient,
+            "invalid_grant" => AppleErrorCode::InvalidGrant,
+            "unauthorized_client" => AppleErrorCode::UnauthorizedClient,
+            "unsupported_grant_type" => AppleErrorCode::UnsupportedGrantType,
+            "invalid_scope" => AppleErrorCode::InvalidScope,
+            _ => AppleErrorCode::UnknownError(body),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_known_error_codes() {
+        assert_eq!(
+            AppleErrorCode::from_response_body(r#"{"error":"invalid_grant"}"#.to_string()),
+            AppleErrorCode::InvalidGrant
+        );
+    }
+
+    #[test]
+    fn falls_back_to_unknown_for_unrecognized_code() {
+        let body = r#"{"error":"some_future_code"}"#.to_string();
+        assert_eq!(
+            AppleErrorCode::from_response_body(body.clone()),
+            AppleErrorCode::UnknownError(body)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_unknown_for_malformed_body() {
+        let body = "not json".to_string();
+        assert_eq!(
+            AppleErrorCode::from_response_body(body.clone()),
+            AppleErrorCode::UnknownError(body)
+        );
+    }
 }

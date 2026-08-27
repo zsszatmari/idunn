@@ -10,7 +10,7 @@ mod test_support;
 mod token_exchange;
 mod transport;
 
-pub use error::{IdunnError, InvalidTokenCause};
+pub use error::{AppleErrorCode, IdunnError, InvalidTokenCause};
 pub use identity_verification::{AppleIdentity, IdentityVerificationConfig, NoncePolicy};
 pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
 use jwks_store::JwksStoreConfig;
@@ -101,6 +101,18 @@ impl<T: HttpTransport> AppleAuthClient<T> {
             &self.token_config,
             &self.signing_key,
             authorization_code,
+        )
+        .await
+    }
+
+    /// Revoke a refresh token previously issued by Apple (e.g. on sign-out or account
+    /// deletion) so it can no longer be used.
+    pub async fn revoke_refresh_token(&self, refresh_token: &str) -> Result<(), IdunnError> {
+        token_exchange::revoke_refresh_token(
+            &self.transport,
+            &self.token_config,
+            &self.signing_key,
+            refresh_token,
         )
         .await
     }

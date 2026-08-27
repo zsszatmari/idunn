@@ -3,10 +3,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
-use crate::error::IdunnError;
+use crate::error::{AppleErrorCode, IdunnError};
 use crate::transport::{HttpTransport, TransportError, encode_form};
 
 const TOKEN_URL: &str = "https://appleid.apple.com/auth/token";
+const REVOKE_URL: &str = "https://appleid.apple.com/auth/revoke";
 /// Client secret is minted fresh for each request, so it only needs to live
 /// long enough to reach Apple's token endpoint.
 const CLIENT_SECRET_TTL_SECS: u64 = 300;
@@ -44,11 +45,6 @@ struct RawTokenResponse {
     refresh_token: String,
     id_token: String,
     expires_in: u64,
-}
-
-#[derive(Deserialize)]
-struct AppleErrorResponse {
-    error: String,
 }
 
 #[derive(Serialize)]
@@ -107,10 +103,7 @@ pub async fn exchange_authorization_code<T: HttpTransport>(
         .map_err(|err| match err {
             TransportError::Network(e) => IdunnError::NetworkError(e),
             TransportError::Http { body, .. } => {
-                let message = serde_json::from_str::<AppleErrorResponse>(&body)
-                    .map(|e| e.error)
-                    .unwrap_or(body);
-                IdunnError::TokenExchangeFailed(message)
+                IdunnError::TokenExchangeFailed(AppleErrorCode::from_response_body(body))
             }
         })?;
     let raw: RawTokenResponse =
@@ -121,6 +114,40 @@ pub async fn exchange_authorization_code<T: HttpTransport>(
         id_token: raw.id_token,
         expires_in: raw.expires_in,
     })
+}
+
+/// Revoke a refresh token previously issued by Apple (e.g. on sign-out or account
+/// deletion) so it can no longer be used.
+/// https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
+pub async fn revoke_refresh_token<T: HttpTransport>(
+    transport: &T,
+    config: &AppleTokenConfig,
+    signing_key: &EncodingKey,
+    refresh_token: &str,
+) -> Result<(), IdunnError> {
+    let client_secret = build_client_secret(config, signing_key)?;
+    let form = [
+        ("client_id", config.client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+        ("token", refresh_token),
+        ("token_type_hint", "refresh_token"),
+    ];
+    let encoded_body = encode_form(&form);
+    transport
+        .post_form(
+            REVOKE_URL,
+            &[("Content-Type", "application/x-www-form-urlencoded")],
+            &encoded_body,
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .map_err(|err| match err {
+            TransportError::Network(e) => IdunnError::NetworkError(e),
+            TransportError::Http { body, .. } => {
+                IdunnError::TokenRevocationFailed(AppleErrorCode::from_response_body(body))
+            }
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -273,8 +300,72 @@ yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
         let result =
             exchange_authorization_code(&transport, &config, &signing_key, "bad-code").await;
 
-        assert!(
-            matches!(result, Err(IdunnError::TokenExchangeFailed(msg)) if msg == "invalid_grant")
-        );
+        assert!(matches!(
+            result,
+            Err(IdunnError::TokenExchangeFailed(
+                AppleErrorCode::InvalidGrant
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn surfaces_unrecognized_apple_error_response() {
+        let config = test_config();
+        let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
+        let transport = FakeTransport::failing_with(TransportError::Http {
+            status: 400,
+            body: r#"{"error":"some_future_code"}"#.to_string(),
+        });
+
+        let result =
+            exchange_authorization_code(&transport, &config, &signing_key, "bad-code").await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::TokenExchangeFailed(
+                AppleErrorCode::UnknownError(_)
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn revokes_refresh_token() {
+        let config = test_config();
+        let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
+        let transport = FakeTransport::returning("");
+
+        let result = revoke_refresh_token(&transport, &config, &signing_key, "refresh-token").await;
+
+        assert!(result.is_ok());
+
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (url, body) = &calls[0];
+        assert_eq!(url, REVOKE_URL);
+        let decoded: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert!(decoded.contains(&("token".to_string(), "refresh-token".to_string())));
+        assert!(decoded.contains(&("token_type_hint".to_string(), "refresh_token".to_string())));
+        assert!(decoded.contains(&("client_id".to_string(), "com.example.myapp".to_string())));
+    }
+
+    #[tokio::test]
+    async fn surfaces_apple_revocation_error() {
+        let config = test_config();
+        let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
+        let transport = FakeTransport::failing_with(TransportError::Http {
+            status: 400,
+            body: r#"{"error":"invalid_grant"}"#.to_string(),
+        });
+
+        let result = revoke_refresh_token(&transport, &config, &signing_key, "bad-token").await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::TokenRevocationFailed(
+                AppleErrorCode::InvalidGrant
+            ))
+        ));
     }
 }
