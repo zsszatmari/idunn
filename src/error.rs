@@ -43,4 +43,10 @@ pub enum InvalidTokenCause {
     /// Header declares an algorithm other than the RS256 Apple actually uses.
     #[error("Apple identity token uses algorithm {0:?} instead of the expected RS256")]
     AlgorithmMismatch(jsonwebtoken::Algorithm),
+    /// The token has no `nonce` claim, and the configured `NoncePolicy`
+    /// requires one — either because the policy is `Strict` (a nonce is
+    /// required unconditionally), or because it's `Permissive` and the
+    /// token's `nonce_supported` claim was `true`.
+    #[error("Apple identity token carries no nonce claim, which the configured nonce policy requires")]
+    MissingNonce,
 }

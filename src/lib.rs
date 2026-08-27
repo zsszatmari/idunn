@@ -11,7 +11,7 @@ mod token_exchange;
 mod transport;
 
 pub use error::{IdunnError, InvalidTokenCause};
-pub use identity_verification::AppleIdentity;
+pub use identity_verification::{AppleIdentity, IdentityVerificationConfig, NoncePolicy};
 pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
 use jwks_store::JwksStoreConfig;
 use transport::HttpTransport;
@@ -46,6 +46,7 @@ impl AppleAuthClient<transport::ReqwestTransport> {
             token_config,
             transport::ReqwestTransport::default(),
             JwksStoreConfig::default(),
+            IdentityVerificationConfig::default(),
         )
     }
 }
@@ -56,6 +57,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         token_config: AppleTokenConfig,
         transport: T,
         jwks_config: JwksStoreConfig,
+        identity_verification_config: IdentityVerificationConfig,
     ) -> Result<Self, IdunnError> {
         let signing_key = EncodingKey::from_ec_pem(&token_config.private_key_pem)
             .map_err(IdunnError::InvalidPrivateKey)?;
@@ -63,6 +65,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
             bundle_ids,
             transport.clone(),
             jwks_config,
+            identity_verification_config,
         );
         Ok(Self {
             identity_verification,

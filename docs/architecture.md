@@ -26,6 +26,11 @@ This abstraction covers every network call idunn makes, including the JWKS fetch
 
 ## Why `verify_identity_token` doesn't check the nonce itself
 
-Apple's own verification checklist (see the comment in `IdentityVerificationClient::new`, `src/identity_verification.rs`) includes checking the token's `nonce` claim against whatever value the app generated for that authentication attempt. idunn deliberately stops short of that: doing the comparison requires knowing where and how the caller tracked the nonce it issued — typically a database lookup — which idunn has no generic way to perform. Instead, `verify_identity_token` extracts the `nonce` claim as-is onto `AppleIdentity` and leaves the comparison to the caller. `None` is returned for `nonce` if the nonce feature is not supported on the platform (i.e. older macOS, iOS, tvOS, watchOS versions), in this case nonce verification can be skipped with low but non-zero risk.
+Apple's own verification checklist (see the comment in `IdentityVerificationClient::new`, `src/identity_verification.rs`) includes checking the token's `nonce` claim against whatever value the app generated for that authentication attempt. idunn deliberately stops short of that comparison: it requires knowing where and how the caller tracked the nonce it issued — typically a database lookup — which idunn has no generic way to perform. Instead, `verify_identity_token` extracts the `nonce` claim as-is onto `AppleIdentity` and leaves the value comparison to the caller.
 
-TODO, ezt atgondolni meg!!
+idunn does, however, enforce nonce *presence*, controlled by `NoncePolicy` (part of `IdentityVerificationConfig`):
+
+- `NoncePolicy::Strict` (the default): a token with no `nonce` claim is always `InvalidToken`, regardless of the token's `nonce_supported` claim. This is stricter than what Apple's docs technically require, chosen so replay protection is never silently disabled by a claim idunn has no way to verify the integrity of.
+- `NoncePolicy::Permissive`: follows the handling Apple's own docs suggest (https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token, `nonce_supported`) — a missing nonce is tolerated (`AppleIdentity::nonce` is `None`) only when `nonce_supported` is `false` or absent; a `nonce_supported: true` claim still fails the token even under this policy, since Apple's guidance is to treat the nonce as mandatory in that case.
+
+When `nonce` is `None` under `Permissive`, `AppleIdentity::issued_at`/`expiration` (from the token's `iat`/`exp` claims) are exposed so the caller can still build its own replay-detection window (e.g. dedupe on the token itself within that range) instead of having no signal at all.

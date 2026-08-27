@@ -3,6 +3,7 @@ use crate::jwks_store::{JwksStore, JwksStoreConfig};
 use crate::transport::HttpTransport;
 use jsonwebtoken::Validation;
 use serde::Deserialize;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Identity extracted from a verified Apple identity token.
 #[derive(Clone, Debug)]
@@ -13,9 +14,45 @@ pub struct AppleIdentity {
     pub email: Option<String>,
     /// The token's `nonce` claim, if present. Comparing it against whatever
     /// nonce the caller generated for this authentication attempt is the
-    /// caller's responsibility. `None` means the  token carries no nonce, which
-    /// happens on some older platforms (e.g. older iOS, macOS, tvOS, watchOS versions)
+    /// caller's responsibility. `None` only occurs when `NoncePolicy::Permissive`
+    /// is configured and the token's `nonce_supported` claim is `false` or
+    /// absent (see `NoncePolicy`) — with the default `NoncePolicy::Strict`, a
+    /// missing nonce is rejected outright instead of ever reaching here. When
+    /// `nonce` is `None`, `issued_at`/`expiration` are the raw material for
+    /// building your own replay-detection window (e.g. dedupe on the token
+    /// itself within the `issued_at..expiration` range).
     pub nonce: Option<String>,
+    /// When the token was issued (JWT `iat`).
+    pub issued_at: SystemTime,
+    /// When the token expires (JWT `exp`) — already enforced by verification
+    /// itself; exposed so a replay-detection window built from `issued_at`
+    /// can be sized consistently with it.
+    pub expiration: SystemTime,
+}
+
+/// Controls how `verify_identity_token` handles a token with no `nonce`
+/// claim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NoncePolicy {
+    /// A missing `nonce` claim is always `InvalidToken`, regardless of the
+    /// token's `nonce_supported` claim. Stricter than Apple's own suggested
+    /// handling (see `Permissive`), chosen as the default so replay
+    /// protection is never silently disabled by a claim idunn can't verify
+    /// the integrity of.
+    #[default]
+    Strict,
+    /// Follow the `nonce_supported`-conditioned handling Apple's docs
+    /// suggest: <https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token>
+    /// — a missing `nonce` is only tolerated (`AppleIdentity::nonce` is
+    /// `None`) when `nonce_supported` is `false` or absent; if
+    /// `nonce_supported` is `true`, a missing nonce is still `InvalidToken`.
+    Permissive,
+}
+
+/// Configuration for `IdentityVerificationClient`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IdentityVerificationConfig {
+    pub nonce_policy: NoncePolicy,
 }
 
 #[derive(Deserialize)]
@@ -23,11 +60,15 @@ struct ApplePayload {
     sub: String,
     email: Option<String>,
     nonce: Option<String>,
+    nonce_supported: Option<bool>,
+    iat: u64,
+    exp: u64,
 }
 
 pub(crate) struct IdentityVerificationClient<T: HttpTransport> {
     jwks_store: JwksStore<T>,
     validation: Validation,
+    config: IdentityVerificationConfig,
 }
 
 impl<T: HttpTransport> IdentityVerificationClient<T> {
@@ -35,6 +76,7 @@ impl<T: HttpTransport> IdentityVerificationClient<T> {
         bundle_ids: &[S],
         transport: T,
         jwks_config: JwksStoreConfig,
+        config: IdentityVerificationConfig,
     ) -> Self {
         let bundle_ids: Vec<String> = bundle_ids
             .iter()
@@ -53,11 +95,13 @@ impl<T: HttpTransport> IdentityVerificationClient<T> {
         //
         // 1 and 5 are handled by `jsonwebtoken::decode` itself (signature
         // against the key `jwks_store` fetched, and `exp`, by default). 3 and
-        // 4 are configured into `validation` below. 2 is deliberately *not*
-        // done here — idunn only extracts the nonce claim in
-        // `verify_identity_token` and returns it on `AppleIdentity`; the
-        // caller compares it against the value it generated, since idunn has
-        // no way to know how/where that's tracked.
+        // 4 are configured into `validation` below. 2 is only partially done
+        // here: `verify_identity_token` enforces nonce *presence* per the
+        // configured `NoncePolicy` and returns the claim as-is on
+        // `AppleIdentity`, but never compares its *value* — that requires
+        // knowing where/how the caller tracked the nonce it issued, which
+        // idunn has no generic way to do, so that comparison stays the
+        // caller's responsibility.
         let mut validation = Validation::new(jsonwebtoken::Algorithm::RS256);
 
         // (some below are jsonwebtoken's defaults but let's be explicit here)
@@ -77,6 +121,7 @@ impl<T: HttpTransport> IdentityVerificationClient<T> {
         Self {
             jwks_store: JwksStore::new(transport, jwks_config),
             validation,
+            config,
         }
     }
 
@@ -105,10 +150,23 @@ impl<T: HttpTransport> IdentityVerificationClient<T> {
             jsonwebtoken::decode::<ApplePayload>(identity_token, &decoding_key, &self.validation)
                 .map_err(InvalidTokenCause::Rejected)
                 .map_err(IdunnError::InvalidToken)?;
+
+        if decoded.claims.nonce.is_none() {
+            let nonce_required = match self.config.nonce_policy {
+                NoncePolicy::Strict => true,
+                NoncePolicy::Permissive => decoded.claims.nonce_supported == Some(true),
+            };
+            if nonce_required {
+                return Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce));
+            }
+        }
+
         Ok(AppleIdentity {
             apple_user_id: decoded.claims.sub,
             email: decoded.claims.email,
             nonce: decoded.claims.nonce,
+            issued_at: UNIX_EPOCH + Duration::from_secs(decoded.claims.iat),
+            expiration: UNIX_EPOCH + Duration::from_secs(decoded.claims.exp),
         })
     }
 }
@@ -120,7 +178,6 @@ mod tests {
     use serde::Serialize;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const TEST_KID: &str = "test-kid-1";
     const TEST_BUNDLE_ID: &str = "com.example.myapp";
@@ -220,23 +277,27 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
         sub: &'a str,
         email: Option<&'a str>,
         nonce: Option<&'a str>,
+        nonce_supported: Option<bool>,
         iss: &'a str,
         aud: &'a str,
+        iat: u64,
         exp: u64,
     }
 
     fn test_claims(nonce: Option<&'static str>) -> TestClaims<'static> {
-        let exp = SystemTime::now()
+        let iat = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs()
-            + 3600;
+            .as_secs();
+        let exp = iat + 3600;
         TestClaims {
             sub: "apple-user-1",
             email: Some("user@example.com"),
             nonce,
+            nonce_supported: None,
             iss: "https://appleid.apple.com",
             aud: TEST_BUNDLE_ID,
+            iat,
             exp,
         }
     }
@@ -261,7 +322,19 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
     }
 
     fn client(transport: MockTransport) -> IdentityVerificationClient<MockTransport> {
-        IdentityVerificationClient::new(&[TEST_BUNDLE_ID], transport, JwksStoreConfig::default())
+        client_with_config(transport, IdentityVerificationConfig::default())
+    }
+
+    fn client_with_config(
+        transport: MockTransport,
+        config: IdentityVerificationConfig,
+    ) -> IdentityVerificationClient<MockTransport> {
+        IdentityVerificationClient::new(
+            &[TEST_BUNDLE_ID],
+            transport,
+            JwksStoreConfig::default(),
+            config,
+        )
     }
 
     #[tokio::test]
@@ -275,17 +348,151 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
         assert_eq!(identity.apple_user_id, "apple-user-1");
         assert_eq!(identity.email.as_deref(), Some("user@example.com"));
         assert_eq!(identity.nonce.as_deref(), Some("expected-nonce"));
+        assert_eq!(
+            identity.issued_at,
+            UNIX_EPOCH + Duration::from_secs(claims.iat)
+        );
+        assert_eq!(
+            identity.expiration,
+            UNIX_EPOCH + Duration::from_secs(claims.exp)
+        );
     }
 
     #[tokio::test]
-    async fn happy_path_without_nonce_returns_none_not_an_error() {
+    async fn missing_nonce_is_rejected_by_default() {
         let claims = test_claims(None);
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
 
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_iat_is_rejected() {
+        #[derive(Serialize)]
+        struct ClaimsWithoutIat<'a> {
+            sub: &'a str,
+            iss: &'a str,
+            aud: &'a str,
+            exp: u64,
+        }
+        let claims = ClaimsWithoutIat {
+            sub: "apple-user-1",
+            iss: "https://appleid.apple.com",
+            aud: TEST_BUNDLE_ID,
+            exp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600,
+        };
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn strict_policy_rejects_missing_nonce_even_when_unsupported() {
+        let mut claims = test_claims(None);
+        claims.nonce_supported = Some(false);
+        let token = sign_token(rs256_header(), &claims);
+        let client = client_with_config(
+            MockTransport::new(jwks_keychain_body_including(TEST_KID)),
+            IdentityVerificationConfig {
+                nonce_policy: NoncePolicy::Strict,
+            },
+        );
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+        ));
+    }
+
+    #[tokio::test]
+    async fn strict_policy_rejects_missing_nonce_when_supported() {
+        let mut claims = test_claims(None);
+        claims.nonce_supported = Some(true);
+        let token = sign_token(rs256_header(), &claims);
+        let client = client_with_config(
+            MockTransport::new(jwks_keychain_body_including(TEST_KID)),
+            IdentityVerificationConfig {
+                nonce_policy: NoncePolicy::Strict,
+            },
+        );
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+        ));
+    }
+
+    #[tokio::test]
+    async fn permissive_policy_accepts_missing_nonce_when_nonce_supported_absent() {
+        let claims = test_claims(None);
+        let token = sign_token(rs256_header(), &claims);
+        let client = client_with_config(
+            MockTransport::new(jwks_keychain_body_including(TEST_KID)),
+            IdentityVerificationConfig {
+                nonce_policy: NoncePolicy::Permissive,
+            },
+        );
+
         let identity = client.verify_identity_token(&token).await.unwrap();
 
         assert_eq!(identity.nonce, None);
+    }
+
+    #[tokio::test]
+    async fn permissive_policy_accepts_missing_nonce_when_nonce_unsupported() {
+        let mut claims = test_claims(None);
+        claims.nonce_supported = Some(false);
+        let token = sign_token(rs256_header(), &claims);
+        let client = client_with_config(
+            MockTransport::new(jwks_keychain_body_including(TEST_KID)),
+            IdentityVerificationConfig {
+                nonce_policy: NoncePolicy::Permissive,
+            },
+        );
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert_eq!(identity.nonce, None);
+    }
+
+    #[tokio::test]
+    async fn permissive_policy_rejects_missing_nonce_when_nonce_supported() {
+        let mut claims = test_claims(None);
+        claims.nonce_supported = Some(true);
+        let token = sign_token(rs256_header(), &claims);
+        let client = client_with_config(
+            MockTransport::new(jwks_keychain_body_including(TEST_KID)),
+            IdentityVerificationConfig {
+                nonce_policy: NoncePolicy::Permissive,
+            },
+        );
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+        ));
     }
 
     #[tokio::test]
@@ -333,16 +540,18 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
         struct ClaimsWithoutAud<'a> {
             sub: &'a str,
             iss: &'a str,
+            iat: u64,
             exp: u64,
         }
+        let iat = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let claims = ClaimsWithoutAud {
             sub: "apple-user-1",
             iss: "https://appleid.apple.com",
-            exp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                + 3600,
+            iat,
+            exp: iat + 3600,
         };
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
