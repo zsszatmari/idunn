@@ -60,9 +60,11 @@ pub trait HttpPost: Clone + Send + Sync + 'static {
 pub trait HttpTransport: HttpGet + HttpPost {}
 impl<T: HttpGet + HttpPost> HttpTransport for T {}
 
+#[cfg(feature = "reqwest")]
 #[derive(Clone, Default)]
 pub struct ReqwestTransport(reqwest::Client);
 
+#[cfg(feature = "reqwest")]
 impl ReqwestTransport {
     /// Wraps a caller-configured `reqwest::Client` — e.g. one built with
     /// `.connection_verbose(true)` for wire-level debugging.
@@ -101,6 +103,7 @@ impl ReqwestTransport {
     }
 }
 
+#[cfg(feature = "reqwest")]
 impl HttpPost for ReqwestTransport {
     async fn post_form(
         &self,
@@ -115,6 +118,7 @@ impl HttpPost for ReqwestTransport {
     }
 }
 
+#[cfg(feature = "reqwest")]
 impl HttpGet for ReqwestTransport {
     async fn get(
         &self,
@@ -133,7 +137,7 @@ pub(crate) fn encode_form(pairs: &[(&str, &str)]) -> String {
         .finish()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "reqwest"))]
 mod tests {
     use super::*;
 

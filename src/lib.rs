@@ -29,13 +29,14 @@ use jsonwebtoken::EncodingKey;
 /// but keep in mind that there might be inner state going on, for example in-flight key
 /// refreshes
 //#[derive(Clone)]
-pub struct AppleAuthClient<T: HttpTransport = transport::ReqwestTransport> {
+pub struct AppleAuthClient<T: HttpTransport> {
     identity_verification: identity_verification::IdentityVerificationClient<T>,
     token_config: AppleTokenConfig,
     signing_key: EncodingKey,
     transport: T,
 }
 
+#[cfg(feature = "reqwest")]
 impl AppleAuthClient<transport::ReqwestTransport> {
     pub fn new<S: AsRef<str>>(
         bundle_ids: &[S],

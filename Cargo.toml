@@ -7,7 +7,7 @@ edition = "2024"
 arc-swap = "1.9.2"
 async-lock = "3.4.2"
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-reqwest = "0.13"
+reqwest = { version = "0.13", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
@@ -16,4 +16,8 @@ url = "2.5.8"
 
 [dev-dependencies]
 env_logger = "0.11"
+# Self-dependency to force the "reqwest" feature on for `cargo test` (and anything
+# built on top of it, e.g. `cargo llvm-cov`) even though it's off by default for
+# plain `cargo build` — tests exercise ReqwestTransport directly.
+idunn = { path = ".", features = ["reqwest"] }
 tokio = { version = "1.53.1", features = ["rt", "macros"] }
