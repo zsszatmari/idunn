@@ -19,6 +19,10 @@ check-powerset-full: tools
 test-features: tools
     cargo hack test --workspace --each-feature --keep-going
 
+# Lint all targets and features, failing on any warning (the invocation CI runs).
+clippy:
+    cargo clippy --workspace --all-targets --all-features
+
 check-all: check-powerset test-features test-minimal-versions
 
 [private]

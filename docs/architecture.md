@@ -27,6 +27,17 @@ Per-field `Arc`, not one `Arc<Inner>`:
 
 Rejected alternative: leave the type non-`Clone` and tell callers to hold an `Arc<AppleAuthClient>`. Workable, but it leaves the cheap wrong path — calling the constructor a second time — open, and that silently duplicates the cache and the rate limiter.
 
+## Why `AppleTokenConfig` zeroizes on drop
+
+`AppleTokenConfig::private_key_pem` holds Apple's `.p8` signing key — long-lived credential material, not a short-lived token. As a plain `Vec<u8>` its bytes were simply freed on drop and left readable in the freed allocation. The `EncodingKey` idunn derives from it in `AppleAuthClient::with_transport` already wipes itself — jsonwebtoken 11 puts `#[derive(Clone, Zeroize, ZeroizeOnDrop)]` on `EncodingKey` — which made idunn's own copy of the same secret the weaker link. `#[derive(ZeroizeOnDrop)]` on `AppleTokenConfig` closes that gap: all fields are wiped on drop (`team_id`/`key_id`/`client_id` aren't secret, but wiping them costs nothing and isn't worth a `#[zeroize(skip)]` each). `zeroize` is already in the build graph via jsonwebtoken, so this adds no new crate.
+
+What it does **not** cover, and why the field doc says so:
+
+- Copies the caller keeps are out of reach. The guarantee only holds if the caller moves the key `Vec` in rather than cloning it off a config object it retains, or leaving the PEM in a `String` env var.
+- `Vec` zeroization is best-effort (documented as such in `zeroize`'s own source): it clears the current allocation's full capacity but can't chase down bytes an earlier reallocation left on the heap while the buffer was being built.
+
+`AppleTokenConfig`'s `Debug` impl is hand-written rather than derived: it prints the non-secret identifiers (`team_id`/`key_id`/`client_id`) in full but replaces `private_key_pem` with a `<N redacted bytes>` placeholder, so the key can't leak into a log line or panic message. Written explicitly rather than just omitting the derive, so that a later `#[derive(Debug)]` can't silently reintroduce the leak.
+
 ## Why identity verification and token exchange share one `client_id`
 
 Identity-token verification and token exchange used to take independently configurable identifiers: a `bundle_ids` slice passed into the constructor for verification's `aud` check, and `AppleTokenConfig::client_id` for signing the client secret used in exchange. Apple's own docs specify that an identity token's `aud` is always the developer's client_id — the same value already required for the client secret — so the two were never actually independent, just accidentally duplicated. `AppleTokenConfig::client_id` is now the single source for both, which also removes the possibility of the two silently drifting out of sync.

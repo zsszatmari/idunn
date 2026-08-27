@@ -17,7 +17,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Credentials needed to authenticate as this app to Apple's token/revoke endpoints.
 /// Grouped as named fields rather than positional constructor args: team_id/key_id/
 /// client_id are all opaque strings and easy to transpose otherwise.
-#[derive(Clone)]
+///
+/// Zeroizes every field on drop (`ZeroizeOnDrop`), including every `Clone` of it, so
+/// the `.p8` key is not left readable in freed memory — the `EncodingKey` idunn
+/// derives from it already does the same. Its `Debug` impl is hand-written to
+/// redact `private_key_pem` (a derived one would dump the raw key bytes into any
+/// log line or panic message). See the note on `private_key_pem` for what the
+/// zeroize guarantee does and does not cover.
+#[derive(Clone, zeroize::ZeroizeOnDrop)]
 pub struct AppleTokenConfig {
     /// The issuer registered claim identifies the principal that issued the client secret.
     /// Because the client secret belongs to your developer team, use the 10-character
@@ -33,7 +40,34 @@ pub struct AppleTokenConfig {
     /// so this one field drives both token exchange and identity verification.
     pub client_id: String,
     /// PEM-encoded PKCS#8 EC private key (the .p8 file Apple provides), as bytes.
+    ///
+    /// This struct wipes its own copy (and every `Clone`'s) on drop, but that only
+    /// helps if the caller doesn't keep a separate one: read the `.p8` straight
+    /// into the `Vec` handed to this field and move it in, rather than cloning it
+    /// off a long-lived config object or leaving the PEM sitting in a `String`
+    /// environment variable. And `Vec`'s zeroization is best-effort — a buffer
+    /// that reallocated while being built may have left earlier bytes elsewhere on
+    /// the heap, which nothing here can reach.
     pub private_key_pem: Vec<u8>,
+}
+
+impl std::fmt::Debug for AppleTokenConfig {
+    /// Hand-written, not derived: the identifier fields are non-secret (see
+    /// their docs) and printed in full, but `private_key_pem` is shown only as
+    /// a byte count so the key never reaches a log or panic message. Keeping
+    /// this explicit also means a later `#[derive(Debug)]` can't silently
+    /// reintroduce the leak.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppleTokenConfig")
+            .field("team_id", &self.team_id)
+            .field("key_id", &self.key_id)
+            .field("client_id", &self.client_id)
+            .field(
+                "private_key_pem",
+                &format_args!("<{} redacted bytes>", self.private_key_pem.len()),
+            )
+            .finish()
+    }
 }
 
 /// Tokens returned by Apple after exchanging an authorization code.
@@ -434,6 +468,41 @@ yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
                 );
             }
             other => panic!("expected an HTTP error response, got {other:?}"),
+        }
+    }
+
+    /// Guarantees the `ZeroizeOnDrop` derive stays on `AppleTokenConfig`: remove
+    /// it and this stops compiling.
+    ///
+    /// A stronger test — fill `private_key_pem` with a known pattern, drop the
+    /// config, then read the freed allocation back through a raw pointer and
+    /// assert it is all zero — was tried and dropped. macOS's allocator writes
+    /// free-list bookkeeping into the head of a just-freed small block, so the
+    /// first ~11 bytes come back nonzero even though the derive zeroed the
+    /// buffer (bytes 11..256 were `0x00`). Asserting on a use-after-free read is
+    /// inherently allocator-dependent; the marker-trait check is what stays.
+    #[test]
+    fn apple_token_config_is_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<AppleTokenConfig>();
+    }
+
+    /// The hand-written `Debug` shows the non-secret identifiers but must never
+    /// render any of the key material.
+    #[test]
+    fn debug_redacts_the_private_key() {
+        let config = test_config();
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("key_id: \"KEY7890\""));
+        assert!(rendered.contains("redacted bytes"));
+        assert!(!rendered.contains("BEGIN PRIVATE KEY"));
+        let pem = String::from_utf8(config.private_key_pem.clone()).unwrap();
+        for line in pem.lines().filter(|l| l.len() > 16) {
+            assert!(
+                !rendered.contains(line),
+                "Debug output leaked a line of the PEM key"
+            );
         }
     }
 }
