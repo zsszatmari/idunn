@@ -13,6 +13,20 @@ These two features barely touch the same code, which is why they live in separat
 
 If verification and token exchange were separate client types, it would be possible to wire up a working sign-in flow that can never revoke a token — an app that's compliant on day one but silently unable to meet Apple's mandatory requirement later. A single constructor that requires all the credentials up front makes that state unreachable: correct usage (a fully-configured client) is the only usage. Token revocation itself isn't implemented yet — this constructor shape is what lets it be added later without changing any caller's configuration.
 
+## Why `AppleAuthClient` clones share their state
+
+`AppleAuthClient` is a *handle* to shared state — a JWKS cache plus the mutex that gives fetches against Apple their single-flight and cooldown/rate-limit behaviour — not a plain value. So it follows the `reqwest::Client` / `sqlx::Pool` convention: `Clone` is cheap and every clone points at the same state. `#[derive(Clone)]` is on the struct, but the shared fields are wrapped so the derive shares rather than duplicates them.
+
+A plain derive over the original field types was rejected. `ArcSwapOption` is itself `Clone`, so a derive would have failed to compile *only* on `JwksStore`'s `async_lock::Mutex` — and had that one field been made cloneable too, the derive would have silently given every clone its own JWKS snapshot and its own cooldown state. N clones would then mean N independent fetches against Apple, and the `cooldown_period` floor (documented in `jwks_store.rs` as protection against DoS) would be enforced per clone instead of per client.
+
+Per-field `Arc`, not one `Arc<Inner>`:
+
+- `identity_verification` holds the cache and the fetch mutex — it **must** be shared, so it is `Arc`'d.
+- `transport` is left a bare field: `HttpGet` already requires `T: Clone` and the trait contract is that it is a cheap handle (`ReqwestTransport` wraps a `reqwest::Client`, itself `Arc`-backed and owning the connection pool). Wrapping it in another `Arc` would be indirection for nothing.
+- `credentials` (`token_config` + the derived `signing_key`) is `Arc`'d not for sharing semantics — a duplicated copy would be harmless — but so that `clone()` stays allocation-free and never copies Apple's private key. `axum`'s `State<T>` clones per request, so a per-field clone here would mean copying the `.p8` key material on every request. Keeping it behind one `Arc` also means there is exactly one copy of the key alive at a time, dropped when the last clone goes.
+
+Rejected alternative: leave the type non-`Clone` and tell callers to hold an `Arc<AppleAuthClient>`. Workable, but it leaves the cheap wrong path — calling the constructor a second time — open, and that silently duplicates the cache and the rate limiter.
+
 ## Why identity verification and token exchange share one `client_id`
 
 Identity-token verification and token exchange used to take independently configurable identifiers: a `bundle_ids` slice passed into the constructor for verification's `aud` check, and `AppleTokenConfig::client_id` for signing the client secret used in exchange. Apple's own docs specify that an identity token's `aud` is always the developer's client_id — the same value already required for the client secret — so the two were never actually independent, just accidentally duplicated. `AppleTokenConfig::client_id` is now the single source for both, which also removes the possibility of the two silently drifting out of sync.
