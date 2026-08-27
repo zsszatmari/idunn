@@ -20,3 +20,17 @@ test-features: tools
     cargo hack test --workspace --each-feature --keep-going
 
 check-all: check-powerset test-features test-minimal-versions
+
+[private]
+coverage-tools:
+    rustup toolchain install nightly --component llvm-tools
+
+# Local HTML coverage report, opened in the browser.
+coverage: coverage-tools
+    cargo +nightly llvm-cov --html --open
+
+# Machine-readable coverage plus a line-coverage gate, for CI.
+# Region coverage is deliberately NOT gated: matches!, assert!, ? and derives
+# leave never-taken regions even in fully exercised code.
+coverage-ci min="80": coverage-tools
+    cargo +nightly llvm-cov --lcov --output-path lcov.info --fail-under-lines {{ min }}

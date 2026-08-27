@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 // https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple
 // https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
 // https://developer.apple.com/support/offering-account-deletion-in-your-app/
@@ -6,6 +7,7 @@ mod error;
 mod identity_verification;
 mod jwks_store;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod test_support;
 mod token_exchange;
 mod transport;
@@ -115,6 +117,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::test_support::test_token_config;

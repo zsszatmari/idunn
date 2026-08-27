@@ -138,6 +138,7 @@ pub(crate) fn encode_form(pairs: &[(&str, &str)]) -> String {
 }
 
 #[cfg(all(test, feature = "reqwest"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

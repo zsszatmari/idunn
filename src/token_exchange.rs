@@ -157,6 +157,7 @@ pub async fn revoke_refresh_token<T: HttpPost>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::test_support::test_token_config as test_config;
