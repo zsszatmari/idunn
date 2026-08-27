@@ -83,11 +83,10 @@ impl<T: HttpGet> JwksStore<T> {
     /// the cached key set if needed. Concurrent misses share one in-flight
     /// fetch via `network_request_mutex` instead of each hitting Apple.
     pub async fn get_key(&self, kid: &str) -> Result<DecodingKey, IdunnError> {
-        if !self.is_stale() {
-            if let Some(key) = self.cached_key(kid) {
+        if !self.is_stale()
+            && let Some(key) = self.cached_key(kid) {
                 return Ok(key);
             }
-        }
 
         self.try_refresh().await;
 
@@ -144,18 +143,17 @@ impl<T: HttpGet> JwksStore<T> {
     /// is older than `refresh_interval`. Says nothing about which kids are in
     /// the snapshot — that's `cached_key`'s job.
     fn is_stale(&self) -> bool {
-        self.key_set.load().as_ref().map_or(true, |cached| {
+        self.key_set.load().as_ref().is_none_or(|cached| {
             cached.fetched_at.elapsed() >= self.config.refresh_interval
         })
     }
 
     async fn try_refresh(&self) -> bool {
         let mut last_attempt = self.network_request_mutex.lock().await;
-        if let Some(attempted_at) = *last_attempt {
-            if attempted_at.elapsed() < self.config.cooldown_period {
+        if let Some(attempted_at) = *last_attempt
+            && attempted_at.elapsed() < self.config.cooldown_period {
                 return false;
             }
-        }
         *last_attempt = Some(Instant::now());
 
         if let Some(keys) = self.fetch_keys().await {
