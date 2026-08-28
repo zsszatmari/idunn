@@ -202,7 +202,7 @@ impl<T: HttpGet> JwksStore<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::test_support::network_error;
+    use crate::transport::test_fixtures::network_error;
     use std::sync::Mutex as StdMutex;
 
     #[derive(Clone)]
@@ -516,7 +516,7 @@ mod tests {
 
         match result {
             Ok(response) => {
-                let jwks: JwkSet = serde_json::from_slice(&response.as_bytes()).unwrap();
+                let jwks: JwkSet = serde_json::from_slice(response.as_bytes()).unwrap();
                 let jwk_map: HashMap<String, DecodingKey> = CachedKeys::jwk_set_to_keymap(&jwks);
                 assert!(jwk_map.keys().len() > 0);
             }

@@ -6,9 +6,6 @@
 mod error;
 mod identity_verification;
 mod jwks_store;
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod test_support;
 mod token_exchange;
 mod transport;
 
@@ -138,10 +135,10 @@ impl<T: HttpTransport> AppleAuthClient<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        TEST_KID, TEST_PUBLIC_KEY_PEM, TEST_RSA_PRIVATE_KEY_PEM, jwks_body_including,
-        test_token_config,
+    use crate::identity_verification::test_fixtures::{
+        TEST_KID, TEST_RSA_PRIVATE_KEY_PEM, jwks_body_including,
     };
+    use crate::token_exchange::test_fixtures::{TEST_PUBLIC_KEY_PEM, test_token_config};
     use crate::transport::{HttpGet, HttpPost, TransportError};
     use serde::Deserialize;
     use std::sync::Mutex as StdMutex;

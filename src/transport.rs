@@ -137,6 +137,22 @@ pub(crate) fn encode_form(pairs: &[(&str, &str)]) -> String {
         .finish()
 }
 
+/// A `TransportError` standing in for Apple being unreachable (connection
+/// refused, timeout, DNS failure, ...) — the exact underlying error never
+/// matters to the code under test, only that it's the `Network` variant.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) mod test_fixtures {
+    use super::TransportError;
+
+    pub(crate) fn network_error() -> TransportError {
+        TransportError::Network(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )))
+    }
+}
+
 #[cfg(all(test, feature = "reqwest"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
