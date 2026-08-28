@@ -320,7 +320,10 @@ mod tests {
         let identity = client.verify_identity_token(&token).await.unwrap();
 
         assert_eq!(identity.apple_user_id, "apple-user-1");
-        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+        assert_eq!(
+            identity.email.as_ref().map(|email| email.address.as_str()),
+            Some("user@example.com")
+        );
         assert_eq!(identity.nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(identity.issued_at, UNIX_EPOCH + Duration::from_secs(iat));
         assert_eq!(identity.expiration, UNIX_EPOCH + Duration::from_secs(exp));

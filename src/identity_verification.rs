@@ -321,6 +321,7 @@ mod tests {
     use super::test_fixtures::{TEST_KID, TEST_RSA_PRIVATE_KEY_PEM, jwks_body_including};
     use crate::transport::test_fixtures::{MockHttpGet, network_error};
     use serde::Serialize;
+    use serde_json::json;
 
     const TEST_BUNDLE_ID: &str = "com.example.myapp";
 
@@ -427,7 +428,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.email = None;
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -439,7 +440,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.email_verified = Some(json!(true));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -451,7 +452,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.email_verified = Some(json!("true"));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -463,7 +464,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.email_verified = Some(json!("false"));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -474,7 +475,7 @@ mod tests {
     async fn email_verified_absent_falls_back_to_false() {
         let claims = test_claims(Some("expected-nonce"));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -486,7 +487,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.email_verified = Some(json!("yes"));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let result = client.verify_identity_token(&token).await;
 
@@ -501,7 +502,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.email_verified = Some(json!(null));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let result = client.verify_identity_token(&token).await;
 
@@ -516,7 +517,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.email = Some("user@privaterelay.appleid.com");
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -527,7 +528,7 @@ mod tests {
     async fn is_private_email_absent_falls_back_to_false_for_ordinary_address() {
         let claims = test_claims(Some("expected-nonce"));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -540,7 +541,7 @@ mod tests {
         claims.email = Some("user@privaterelay.appleid.com");
         claims.is_private_email = Some(json!(false));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -552,7 +553,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.is_private_email = Some(json!(true));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -563,7 +564,7 @@ mod tests {
     async fn real_user_status_absent_is_unsupported() {
         let claims = test_claims(Some("expected-nonce"));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -580,7 +581,7 @@ mod tests {
             let mut claims = test_claims(Some("expected-nonce"));
             claims.real_user_status = Some(raw);
             let token = sign_token(rs256_header(), &claims);
-            let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+            let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
             let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -593,7 +594,7 @@ mod tests {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.real_user_status = Some(777);
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
