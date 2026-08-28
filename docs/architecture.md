@@ -64,6 +64,47 @@ idunn does, however, enforce nonce *presence*, controlled by `NoncePolicy` (part
 
 When `nonce` is `None` under `Permissive`, `AppleIdentity::issued_at`/`expiration` (from the token's `iat`/`exp` claims) are exposed so the caller can still build its own replay-detection window (e.g. dedupe on the token itself within that range) instead of having no signal at all.
 
+## Why the email claims are one struct and the flags aren't optional
+
+Apple's `id_token` carries `email_verified` and `is_private_email` alongside `email`
+(<https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token>), but neither
+flag means anything without an address to qualify. `AppleIdentity::email` is therefore
+`Option<AppleEmail>` — one optional struct gated on whether the token carried an `email` claim at
+all — rather than three independently optional fields on `AppleIdentity` that a caller could combine
+into a nonsensical state (a `verified: true` with no address).
+
+Inside `AppleEmail`, `verified` and `is_private` are plain `bool`s, not `Option<bool>`, despite both
+source claims being optional on the wire:
+
+- `verified` defaults to `false` when `email_verified` is absent. Apple's own docs already document
+  the absent case as equivalent to a `false` value (Sign in with Apple at Work & School), so there is
+  no distinct "unknown" state worth preserving — `Option<bool>` would just push a meaningless
+  three-way match onto every caller.
+- `is_private` defaults to checking whether the address ends with `@privaterelay.appleid.com` when
+  `is_private_email` is absent. Apple's private relay domain is a known, stable string, so this
+  fallback gives callers a real answer instead of `None` in the case — token issuers other than
+  current Apple SDKs, or historical tokens — where the claim wasn't sent. The claim, when present,
+  always wins over the heuristic in both directions: an explicit `false` on a relay-looking address
+  is trusted over the domain guess, and vice versa. The heuristic only fires on absence.
+
+`email_verified`/`is_private_email` also arrive as either a JSON Boolean or the strings `"true"` /
+`"false"` — Apple's docs state this explicitly. Both forms are parsed inside a `serde`
+`deserialize_with` function on `ApplePayload` (not converted after `jsonwebtoken::decode`), so a
+malformed value (anything else, including an explicit `null`) becomes a plain deserialization
+failure that flows through `jsonwebtoken::decode`'s existing JSON-error path and rejects the token as
+`InvalidTokenCause::Rejected` — the same failure mode a missing `iat`/`aud` already produces, with no
+new error variant needed.
+
+`real_user_status` (`ASUserDetectionStatus`) is modeled as an enum with `Unsupported`/`Unknown`/
+`LikelyReal` plus a catch-all `Other(i64)`, rather than a strict enum or a raw integer. Apple
+documents the claim as absent for web-based apps and pre-iOS-14/macOS-11 clients, which
+`Other`/`Unsupported` already models without a separate `Option` wrapper (absence maps to
+`Unsupported`, since idunn can't distinguish "this client doesn't support the signal" from "Apple
+sent 0"). `Other(i64)` exists so that a future additive value Apple introduces is preserved instead
+of failing verification outright — deserializing the claim as `i64` (not `u8`) keeps that fallback
+total, since a strict-width integer would itself reject an out-of-range value before the `Other` arm
+ever ran.
+
 ## Why coverage excludes test modules (and needs nightly)
 
 `cargo llvm-cov` instruments the crate's inline `#[cfg(test)] mod tests` modules along with the production code. Test code runs by definition, so it reports ~100% covered and pulls the totals up — the overall figure was ~95% while `lib.rs`, the file with the real gap, sat at 53%. For `jwks_store.rs`, roughly half the measured lines were test code. Excluding the test modules makes the number measure the production code again.

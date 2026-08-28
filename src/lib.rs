@@ -13,7 +13,9 @@ mod token_exchange;
 mod transport;
 
 pub use error::{AppleErrorCode, IdunnError, InvalidTokenCause};
-pub use identity_verification::{AppleIdentity, IdentityVerificationConfig, NoncePolicy};
+pub use identity_verification::{
+    AppleEmail, AppleIdentity, IdentityVerificationConfig, NoncePolicy, RealUserStatus,
+};
 pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
 use jwks_store::JwksStoreConfig;
 use transport::HttpTransport;
