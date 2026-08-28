@@ -214,16 +214,29 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
     const TEST_RSA_E: &str = "AQAB";
 
     #[derive(Clone)]
+    enum MockResponse {
+        Success(String),
+        NetworkFailure,
+    }
+
+    #[derive(Clone)]
     struct MockTransport {
         calls: Arc<Mutex<usize>>,
-        jwks_body: String,
+        response: MockResponse,
     }
 
     impl MockTransport {
         fn new(jwks_body: String) -> Self {
             Self {
                 calls: Arc::default(),
-                jwks_body,
+                response: MockResponse::Success(jwks_body),
+            }
+        }
+
+        fn failing_with_network_error() -> Self {
+            Self {
+                calls: Arc::default(),
+                response: MockResponse::NetworkFailure,
             }
         }
 
@@ -240,7 +253,12 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
             _timeout: Duration,
         ) -> Result<String, TransportError> {
             *self.calls.lock().unwrap() += 1;
-            Ok(self.jwks_body.clone())
+            match &self.response {
+                MockResponse::Success(body) => Ok(body.clone()),
+                MockResponse::NetworkFailure => Err(TransportError::Network(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused"),
+                ))),
+            }
         }
     }
 
@@ -517,6 +535,19 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
                 kid: None
             }))
         ));
+    }
+
+    #[tokio::test]
+    async fn apple_unavailable_surfaces_as_cannot_verify_token() {
+        let claims = test_claims(Some("expected-nonce"));
+        let token = sign_token(rs256_header(), &claims);
+        let transport = MockTransport::failing_with_network_error();
+        let client = client(transport.clone());
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert_eq!(transport.call_count(), 1);
     }
 
     #[tokio::test]

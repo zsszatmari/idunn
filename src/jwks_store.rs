@@ -84,9 +84,10 @@ impl<T: HttpGet> JwksStore<T> {
     /// fetch via `network_request_mutex` instead of each hitting Apple.
     pub async fn get_key(&self, kid: &str) -> Result<DecodingKey, IdunnError> {
         if !self.is_stale()
-            && let Some(key) = self.cached_key(kid) {
-                return Ok(key);
-            }
+            && let Some(key) = self.cached_key(kid)
+        {
+            return Ok(key);
+        }
 
         self.try_refresh().await;
 
@@ -143,17 +144,19 @@ impl<T: HttpGet> JwksStore<T> {
     /// is older than `refresh_interval`. Says nothing about which kids are in
     /// the snapshot — that's `cached_key`'s job.
     fn is_stale(&self) -> bool {
-        self.key_set.load().as_ref().is_none_or(|cached| {
-            cached.fetched_at.elapsed() >= self.config.refresh_interval
-        })
+        self.key_set
+            .load()
+            .as_ref()
+            .is_none_or(|cached| cached.fetched_at.elapsed() >= self.config.refresh_interval)
     }
 
     async fn try_refresh(&self) -> bool {
         let mut last_attempt = self.network_request_mutex.lock().await;
         if let Some(attempted_at) = *last_attempt
-            && attempted_at.elapsed() < self.config.cooldown_period {
-                return false;
-            }
+            && attempted_at.elapsed() < self.config.cooldown_period
+        {
+            return false;
+        }
         *last_attempt = Some(Instant::now());
 
         if let Some(keys) = self.fetch_keys().await {
@@ -264,6 +267,13 @@ mod tests {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_millis(20),
         }
+    }
+
+    fn network_error() -> TransportError {
+        TransportError::Network(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )))
     }
 
     #[tokio::test]
@@ -451,6 +461,57 @@ mod tests {
         let result = store.get_key("kid-1").await;
 
         assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn network_error_does_not_surface_to_caller() {
+        let transport = MockTransport::failing_with(network_error());
+        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+
+        let result = store.get_key("kid-1").await;
+
+        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_cache_with_failed_refresh_and_unknown_kid_is_cannot_verify() {
+        let transport = MockTransport::sequence(vec![
+            Ok(jwks_body("kid-1")),
+            Err(TransportError::Http {
+                status: 500,
+                body: "boom".to_string(),
+            }),
+        ]);
+        let store = JwksStore::new(transport.clone(), very_fast_config());
+
+        store.get_key("kid-1").await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // kid-2 was never in any snapshot; the refresh attempt fails, so this
+        // must be reported as "can't verify" (inconclusive), not "invalid
+        // kid" (confidently absent) — that distinction is only trustworthy
+        // after a fresh, successful fetch.
+        let result = store.get_key("kid-2").await;
+        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert_eq!(transport.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_share_a_single_failed_fetch() {
+        let transport = MockTransport::failing_with(TransportError::Http {
+            status: 500,
+            body: "boom".to_string(),
+        });
+        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+
+        let (first, second) = tokio::join!(store.get_key("kid-1"), store.get_key("kid-1"));
+
+        assert!(matches!(first, Err(IdunnError::CannotVerifyToken)));
+        assert!(matches!(second, Err(IdunnError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 1);
     }
 
