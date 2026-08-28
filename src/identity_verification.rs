@@ -6,12 +6,17 @@ use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Identity extracted from a verified Apple identity token.
+/// for further info, see https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token
 #[derive(Clone, Debug)]
 pub struct AppleIdentity {
     /// Stable per-app-developer-team Apple user identifier (JWT `sub`).
     pub apple_user_id: String,
     /// Only reliably present on the user's first authorization.
-    pub email: Option<String>,
+    pub email: Option<AppleEmail>,
+    /// Apple's fraud-mitigation signal (`real_user_status` claim). `Unsupported`
+    /// when the claim is absent — it isn't sent for web-based apps or below iOS
+    /// 14 / macOS 11.
+    pub real_user_status: RealUserStatus,
     /// The token's `nonce` claim, if present. Comparing it against whatever
     /// nonce the caller generated for this authentication attempt is the
     /// caller's responsibility. `None` only occurs when `NoncePolicy::Permissive`
@@ -28,6 +33,38 @@ pub struct AppleIdentity {
     /// itself; exposed so a replay-detection window built from `issued_at`
     /// can be sized consistently with it.
     pub expiration: SystemTime,
+}
+
+/// The email-related claims of an Apple identity token, present only when the
+/// token carried an `email` claim at all (Apple reliably sends it only on the
+/// user's first authorization).
+#[derive(Clone, Debug)]
+pub struct AppleEmail {
+    /// The address from the token's `email` claim.
+    pub address: String,
+    /// Apple's `email_verified` claim. `false` when the claim is absent — Apple
+    /// documents it as `false` for Sign in with Apple at Work & School users,
+    /// so absence is treated as "not verified" rather than as unknown.
+    pub verified: bool,
+    /// Whether `address` is one of Apple's private relay proxy addresses.
+    /// Taken from the `is_private_email` claim when present; when the claim is
+    /// absent, inferred from the address' `@privaterelay.appleid.com` suffix.
+    pub is_private: bool,
+}
+
+/// Apple's `real_user_status` fraud signal (`ASUserDetectionStatus`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealUserStatus {
+    /// Apple's `0`, and also what an absent claim maps to — the claim is not
+    /// supported for web-based apps or below iOS 14 / macOS 11.
+    Unsupported,
+    /// Apple's `1`.
+    Unknown,
+    /// Apple's `2`.
+    LikelyReal,
+    /// A value Apple has added since this was written; carried through
+    /// unchanged rather than failing the token.
+    Other(i64),
 }
 
 /// Controls how `verify_identity_token` handles a token with no `nonce`
@@ -59,10 +96,42 @@ pub struct IdentityVerificationConfig {
 struct ApplePayload {
     sub: String,
     email: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_flexible_bool")]
+    email_verified: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_flexible_bool")]
+    is_private_email: Option<bool>,
+    real_user_status: Option<i64>,
     nonce: Option<String>,
     nonce_supported: Option<bool>,
     iat: u64,
     exp: u64,
+}
+
+/// Apple sends `email_verified`/`is_private_email` as either a JSON Boolean or
+/// the strings `"true"`/`"false"`. This parses the value inside deserialization
+/// (rather than after `jsonwebtoken::decode`) so a malformed value surfaces as
+/// the same `InvalidTokenCause::Rejected` a missing required claim does,
+/// through jsonwebtoken's own JSON-error wrapping.
+fn deserialize_flexible_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrString {
+        Bool(bool),
+        Str(String),
+    }
+
+    match BoolOrString::deserialize(deserializer)? {
+        BoolOrString::Bool(value) => Ok(Some(value)),
+        BoolOrString::Str(value) if value == "true" => Ok(Some(true)),
+        BoolOrString::Str(value) if value == "false" => Ok(Some(false)),
+        BoolOrString::Str(value) => Err(serde::de::Error::invalid_value(
+            serde::de::Unexpected::Str(&value),
+            &"\"true\" or \"false\"",
+        )),
+    }
 }
 
 pub(crate) struct IdentityVerificationClient<T: HttpGet> {
@@ -156,9 +225,28 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
             }
         }
 
+        const PRIVATE_RELAY_SUFFIX: &str = "@privaterelay.appleid.com";
+
+        let email = decoded.claims.email.map(|address| AppleEmail {
+            verified: decoded.claims.email_verified.unwrap_or(false),
+            is_private: decoded
+                .claims
+                .is_private_email
+                .unwrap_or_else(|| address.to_ascii_lowercase().ends_with(PRIVATE_RELAY_SUFFIX)),
+            address,
+        });
+
+        let real_user_status = match decoded.claims.real_user_status {
+            None | Some(0) => RealUserStatus::Unsupported,
+            Some(1) => RealUserStatus::Unknown,
+            Some(2) => RealUserStatus::LikelyReal,
+            Some(other) => RealUserStatus::Other(other),
+        };
+
         Ok(AppleIdentity {
             apple_user_id: decoded.claims.sub,
-            email: decoded.claims.email,
+            email,
+            real_user_status,
             nonce: decoded.claims.nonce,
             issued_at: UNIX_EPOCH + Duration::from_secs(decoded.claims.iat),
             expiration: UNIX_EPOCH + Duration::from_secs(decoded.claims.exp),
@@ -240,6 +328,11 @@ mod tests {
     struct TestClaims<'a> {
         sub: &'a str,
         email: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        email_verified: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_private_email: Option<serde_json::Value>,
+        real_user_status: Option<i64>,
         nonce: Option<&'a str>,
         nonce_supported: Option<bool>,
         iss: &'a str,
@@ -257,6 +350,9 @@ mod tests {
         TestClaims {
             sub: "apple-user-1",
             email: Some("user@example.com"),
+            email_verified: None,
+            is_private_email: None,
+            real_user_status: None,
             nonce,
             nonce_supported: None,
             iss: "https://appleid.apple.com",
@@ -310,7 +406,11 @@ mod tests {
         let identity = client.verify_identity_token(&token).await.unwrap();
 
         assert_eq!(identity.apple_user_id, "apple-user-1");
-        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+        let email = identity.email.as_ref().unwrap();
+        assert_eq!(email.address, "user@example.com");
+        assert!(!email.verified);
+        assert!(!email.is_private);
+        assert_eq!(identity.real_user_status, RealUserStatus::Unsupported);
         assert_eq!(identity.nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(
             identity.issued_at,
@@ -320,6 +420,184 @@ mod tests {
             identity.expiration,
             UNIX_EPOCH + Duration::from_secs(claims.exp)
         );
+    }
+
+    #[tokio::test]
+    async fn email_absent_yields_no_email() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email = None;
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(identity.email.is_none());
+    }
+
+    #[tokio::test]
+    async fn email_verified_as_boolean_true_is_honored() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email_verified = Some(json!(true));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(identity.email.unwrap().verified);
+    }
+
+    #[tokio::test]
+    async fn email_verified_as_string_true_is_honored() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email_verified = Some(json!("true"));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(identity.email.unwrap().verified);
+    }
+
+    #[tokio::test]
+    async fn email_verified_as_string_false_is_honored() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email_verified = Some(json!("false"));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(!identity.email.unwrap().verified);
+    }
+
+    #[tokio::test]
+    async fn email_verified_absent_falls_back_to_false() {
+        let claims = test_claims(Some("expected-nonce"));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(!identity.email.unwrap().verified);
+    }
+
+    #[tokio::test]
+    async fn email_verified_malformed_string_is_rejected() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email_verified = Some(json!("yes"));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn email_verified_explicit_null_is_rejected() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email_verified = Some(json!(null));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn is_private_email_absent_falls_back_to_relay_suffix_when_matching() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email = Some("user@privaterelay.appleid.com");
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(identity.email.unwrap().is_private);
+    }
+
+    #[tokio::test]
+    async fn is_private_email_absent_falls_back_to_false_for_ordinary_address() {
+        let claims = test_claims(Some("expected-nonce"));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(!identity.email.unwrap().is_private);
+    }
+
+    #[tokio::test]
+    async fn is_private_email_explicit_false_overrides_relay_suffix_heuristic() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.email = Some("user@privaterelay.appleid.com");
+        claims.is_private_email = Some(json!(false));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(!identity.email.unwrap().is_private);
+    }
+
+    #[tokio::test]
+    async fn is_private_email_explicit_true_overrides_ordinary_address() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.is_private_email = Some(json!(true));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert!(identity.email.unwrap().is_private);
+    }
+
+    #[tokio::test]
+    async fn real_user_status_absent_is_unsupported() {
+        let claims = test_claims(Some("expected-nonce"));
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert_eq!(identity.real_user_status, RealUserStatus::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn real_user_status_known_values_are_mapped() {
+        for (raw, expected) in [
+            (0, RealUserStatus::Unsupported),
+            (1, RealUserStatus::Unknown),
+            (2, RealUserStatus::LikelyReal),
+        ] {
+            let mut claims = test_claims(Some("expected-nonce"));
+            claims.real_user_status = Some(raw);
+            let token = sign_token(rs256_header(), &claims);
+            let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+            let identity = client.verify_identity_token(&token).await.unwrap();
+
+            assert_eq!(identity.real_user_status, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn real_user_status_unknown_value_is_preserved_as_other() {
+        let mut claims = test_claims(Some("expected-nonce"));
+        claims.real_user_status = Some(777);
+        let token = sign_token(rs256_header(), &claims);
+        let client = client(MockTransport::new(jwks_keychain_body_including(TEST_KID)));
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert_eq!(identity.real_user_status, RealUserStatus::Other(777));
     }
 
     #[tokio::test]
