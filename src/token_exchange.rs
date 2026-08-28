@@ -194,14 +194,10 @@ pub async fn revoke_refresh_token<T: HttpPost>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::test_support::TEST_PUBLIC_KEY_PEM;
     use crate::test_support::test_token_config as test_config;
     use jsonwebtoken::{Algorithm, DecodingKey, Validation};
     use std::sync::{Arc, Mutex};
-
-    const TEST_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDUkWXbQLEmRvKU7i4iuyXS1KIPzO\n\
-yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
------END PUBLIC KEY-----\n";
 
     #[test]
     fn client_secret_is_a_well_formed_apple_jwt() {

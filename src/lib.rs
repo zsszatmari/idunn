@@ -138,10 +138,14 @@ impl<T: HttpTransport> AppleAuthClient<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::test_support::test_token_config;
+    use crate::test_support::{
+        TEST_KID, TEST_PUBLIC_KEY_PEM, TEST_RSA_PRIVATE_KEY_PEM, jwks_body_including,
+        test_token_config,
+    };
     use crate::transport::{HttpGet, HttpPost, TransportError};
+    use serde::Deserialize;
     use std::sync::Mutex as StdMutex;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn constructs_client_from_token_config() {
@@ -159,21 +163,39 @@ mod tests {
         assert!(matches!(result, Err(IdunnError::InvalidPrivateKey(_))));
     }
 
-    /// Minimal well-formed JWKS body — the key contents don't matter here, only
-    /// that each `get` is counted.
-    const JWKS_BODY: &str = r#"{"keys":[{"kty":"RSA","kid":"test-kid","n":"AQAB","e":"AQAB"}]}"#;
-
-    /// Transport that counts JWKS fetches and never posts. `Clone` shares the
-    /// counter, so a fetch made through any clone is observed here. (This is a
-    /// fourth hand-rolled transport mock in the crate — the ones in
-    /// `jwks_store`/`identity_verification`/`token_exchange` tests are private to
-    /// their own modules; consolidating them is a separate follow-up.)
+    /// Fake transport serving both verbs `AppleAuthClient` needs: JWKS fetches
+    /// (`get`, counted) and Apple's token/revoke endpoints (`post_form`, recorded
+    /// with their URL and body so tests can inspect exactly what was sent).
+    /// `Clone` shares `get_calls` and `posts` through their `Arc`s, so calls made
+    /// through any clone are observed here.
     #[derive(Clone)]
-    struct CountingTransport {
+    struct FakeAppleTransport {
         get_calls: Arc<StdMutex<usize>>,
+        posts: Arc<StdMutex<Vec<(String, String)>>>,
+        jwks_body: String,
+        post_response: String,
     }
 
-    impl HttpGet for CountingTransport {
+    impl FakeAppleTransport {
+        fn new(jwks_body: impl Into<String>, post_response: impl Into<String>) -> Self {
+            Self {
+                get_calls: Arc::default(),
+                posts: Arc::default(),
+                jwks_body: jwks_body.into(),
+                post_response: post_response.into(),
+            }
+        }
+
+        fn get_calls(&self) -> usize {
+            *self.get_calls.lock().unwrap()
+        }
+
+        fn posts(&self) -> Vec<(String, String)> {
+            self.posts.lock().unwrap().clone()
+        }
+    }
+
+    impl HttpGet for FakeAppleTransport {
         async fn get(
             &self,
             _url: &str,
@@ -181,20 +203,23 @@ mod tests {
             _timeout: Duration,
         ) -> Result<String, TransportError> {
             *self.get_calls.lock().unwrap() += 1;
-            Ok(JWKS_BODY.to_string())
+            Ok(self.jwks_body.clone())
         }
     }
 
-    impl HttpPost for CountingTransport {
+    impl HttpPost for FakeAppleTransport {
         async fn post_form(
             &self,
-            _url: &str,
+            url: &str,
             _headers: &[(&str, &str)],
-            _body: &str,
+            body: &str,
             _timeout: Duration,
         ) -> Result<String, TransportError> {
-            // This test only drives `refresh_keystore`, which never posts.
-            unreachable!("this test never posts")
+            self.posts
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.to_string()));
+            Ok(self.post_response.clone())
         }
     }
 
@@ -205,9 +230,7 @@ mod tests {
     /// per-field `Arc` design against an accidental un-`Arc` of a field.
     #[tokio::test]
     async fn clone_shares_jwks_cache_and_rate_limiter() {
-        let transport = CountingTransport {
-            get_calls: Arc::new(StdMutex::new(0)),
-        };
+        let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
         let client = AppleAuthClient::with_transport(
             test_token_config(),
             transport.clone(),
@@ -219,6 +242,189 @@ mod tests {
         client.refresh_keystore().await.unwrap();
         client.clone().refresh_keystore().await.unwrap();
 
-        assert_eq!(*transport.get_calls.lock().unwrap(), 1);
+        assert_eq!(transport.get_calls(), 1);
+    }
+
+    /// Signs an RS256 identity token, playing Apple, with `aud` as its audience —
+    /// the rest of the claims are fixed. Returns the token plus its `iat`/`exp` so
+    /// callers can assert `AppleIdentity::issued_at`/`expiration` exactly.
+    fn signed_identity_token(aud: &str) -> (String, u64, u64) {
+        let iat = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = iat + 3600;
+        let claims = serde_json::json!({
+            "sub": "apple-user-1",
+            "email": "user@example.com",
+            "nonce": "expected-nonce",
+            "iss": "https://appleid.apple.com",
+            "aud": aud,
+            "iat": iat,
+            "exp": exp,
+        });
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let key =
+            jsonwebtoken::EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+        let token = jsonwebtoken::encode(&header, &claims, &key).unwrap();
+        (token, iat, exp)
+    }
+
+    /// Looks up a single `key`'s value in a `application/x-www-form-urlencoded` body.
+    fn form_field(body: &str, key: &str) -> Option<String> {
+        url::form_urlencoded::parse(body.as_bytes())
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    }
+
+    /// Verifies a client secret the way Apple would: valid ES256 signature under
+    /// the test key pair, and `iss`/`sub` matching `test_token_config()` — i.e.
+    /// that `AppleAuthClient` signed with *its own* credentials, not some other
+    /// key or config.
+    fn assert_client_secret_matches_config(client_secret: &str) {
+        #[derive(Deserialize)]
+        struct Claims {
+            iss: String,
+            sub: String,
+        }
+
+        let header = jsonwebtoken::decode_header(client_secret).unwrap();
+        assert_eq!(header.kid.as_deref(), Some("KEY7890"));
+
+        let decoding_key =
+            jsonwebtoken::DecodingKey::from_ec_pem(TEST_PUBLIC_KEY_PEM.as_bytes()).unwrap();
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.set_audience(&["https://appleid.apple.com"]);
+        validation.set_required_spec_claims(&["iss", "iat", "exp", "aud", "sub"]);
+        let claims = jsonwebtoken::decode::<Claims>(client_secret, &decoding_key, &validation)
+            .unwrap()
+            .claims;
+
+        assert_eq!(claims.iss, "TEAM123456");
+        assert_eq!(claims.sub, "com.example.myapp");
+    }
+
+    #[tokio::test]
+    async fn verify_identity_token_returns_the_identity_from_a_token_signed_by_apple() {
+        let config = test_token_config();
+        let (token, iat, exp) = signed_identity_token(&config.client_id);
+        let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+        let client = AppleAuthClient::with_transport(
+            config,
+            transport,
+            JwksStoreConfig::default(),
+            IdentityVerificationConfig::default(),
+        )
+        .expect("valid test key should construct client");
+
+        let identity = client.verify_identity_token(&token).await.unwrap();
+
+        assert_eq!(identity.apple_user_id, "apple-user-1");
+        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+        assert_eq!(identity.nonce.as_deref(), Some("expected-nonce"));
+        assert_eq!(identity.issued_at, UNIX_EPOCH + Duration::from_secs(iat));
+        assert_eq!(identity.expiration, UNIX_EPOCH + Duration::from_secs(exp));
+    }
+
+    /// Pins that the audience checked against a token is `AppleAuthClient`'s own
+    /// `token_config.client_id`, not some other value: the token here is signed
+    /// for the config's original `client_id`, but the client is built from a
+    /// config whose `client_id` was changed afterwards, so verification must fail.
+    #[tokio::test]
+    async fn verify_identity_token_validates_audience_against_the_configured_client_id() {
+        let original_config = test_token_config();
+        let (token, _, _) = signed_identity_token(&original_config.client_id);
+        let mut config = original_config;
+        config.client_id = "com.example.other".to_string();
+        let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+        let client = AppleAuthClient::with_transport(
+            config,
+            transport,
+            JwksStoreConfig::default(),
+            IdentityVerificationConfig::default(),
+        )
+        .expect("valid test key should construct client");
+
+        let result = client.verify_identity_token(&token).await;
+
+        assert!(matches!(
+            result,
+            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn exchange_authorization_code_posts_a_signed_client_secret_and_returns_the_tokens() {
+        let transport = FakeAppleTransport::new(
+            "",
+            r#"{"access_token":"at","refresh_token":"rt","id_token":"it","expires_in":3600}"#,
+        );
+        let client = AppleAuthClient::with_transport(
+            test_token_config(),
+            transport.clone(),
+            JwksStoreConfig::default(),
+            IdentityVerificationConfig::default(),
+        )
+        .expect("valid test key should construct client");
+
+        let response = client
+            .exchange_authorization_code("auth-code")
+            .await
+            .unwrap();
+
+        assert_eq!(response.access_token, "at");
+        assert_eq!(response.refresh_token, "rt");
+        assert_eq!(response.id_token, "it");
+        assert_eq!(response.expires_in, 3600);
+
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 1);
+        let (url, body) = &posts[0];
+        assert_eq!(url, "https://appleid.apple.com/auth/token");
+        assert_eq!(
+            form_field(body, "grant_type").as_deref(),
+            Some("authorization_code")
+        );
+        assert_eq!(form_field(body, "code").as_deref(), Some("auth-code"));
+        assert_eq!(
+            form_field(body, "client_id").as_deref(),
+            Some("com.example.myapp")
+        );
+        assert_client_secret_matches_config(&form_field(body, "client_secret").unwrap());
+    }
+
+    #[tokio::test]
+    async fn revoke_refresh_token_posts_a_signed_client_secret_to_the_revoke_endpoint() {
+        let transport = FakeAppleTransport::new("", "");
+        let client = AppleAuthClient::with_transport(
+            test_token_config(),
+            transport.clone(),
+            JwksStoreConfig::default(),
+            IdentityVerificationConfig::default(),
+        )
+        .expect("valid test key should construct client");
+
+        let result = client.revoke_refresh_token("refresh-token").await;
+
+        assert!(result.is_ok());
+
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 1);
+        let (url, body) = &posts[0];
+        assert_eq!(url, "https://appleid.apple.com/auth/revoke");
+        assert_eq!(
+            form_field(body, "token").as_deref(),
+            Some("refresh-token")
+        );
+        assert_eq!(
+            form_field(body, "token_type_hint").as_deref(),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            form_field(body, "client_id").as_deref(),
+            Some("com.example.myapp")
+        );
+        assert_client_secret_matches_config(&form_field(body, "client_secret").unwrap());
     }
 }
