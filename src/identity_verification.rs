@@ -255,9 +255,7 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
             *self.calls.lock().unwrap() += 1;
             match &self.response {
                 MockResponse::Success(body) => Ok(body.clone()),
-                MockResponse::NetworkFailure => Err(TransportError::Network(Box::new(
-                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused"),
-                ))),
+                MockResponse::NetworkFailure => Err(crate::test_support::network_error()),
             }
         }
     }

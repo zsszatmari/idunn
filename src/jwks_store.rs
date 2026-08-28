@@ -202,6 +202,7 @@ impl<T: HttpGet> JwksStore<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::test_support::network_error;
     use std::sync::Mutex as StdMutex;
 
     #[derive(Clone)]
@@ -267,13 +268,6 @@ mod tests {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_millis(20),
         }
-    }
-
-    fn network_error() -> TransportError {
-        TransportError::Network(Box::new(std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            "connection refused",
-        )))
     }
 
     #[tokio::test]
