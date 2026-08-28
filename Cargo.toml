@@ -21,6 +21,8 @@ env_logger = "0.11"
 # built on top of it, e.g. `cargo llvm-cov`) even though it's off by default for
 # plain `cargo build` — tests exercise ReqwestTransport directly.
 idunn = { path = ".", features = ["reqwest"] }
+# gzip feature needed for test coverage
+reqwest = { version = "0.13", features = ["gzip"] }
 tokio = { version = "1.53.1", features = ["rt", "macros"] }
 
 [lints.rust]

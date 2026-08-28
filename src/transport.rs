@@ -214,9 +214,12 @@ pub(crate) mod test_fixtures {
 #[cfg(all(test, feature = "reqwest"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
     use super::*;
 
     #[tokio::test]
+    #[cfg(feature = "reqwest")]
     async fn send_returns_network_error_when_request_fails() {
         let client = reqwest::Client::new();
         let transport = ReqwestTransport::with_client(client);
@@ -226,5 +229,40 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(TransportError::Network(_))));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "reqwest")]
+    async fn send_returns_network_error_when_response_fails() {
+        use reqwest::RequestBuilder;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let _ = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut line = String::new();
+            let mut reader = tokio::io::BufReader::new(&mut stream);
+            loop {
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" || line.trim().is_empty() {
+                    break;
+                }
+            }
+
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 14\r\n\r\nmalformed gzip"
+            ).await.unwrap();
+            stream.flush().await.unwrap();
+            // don't wait for the client, deliberatelyend task, socket is dropped
+        });
+
+        let client = reqwest::Client::builder().gzip(true).build().unwrap();
+        let transport = ReqwestTransport::with_client(client);
+        let request_builder: RequestBuilder = transport.0.get(format!("http://{address}/"));
+
+        let err = ReqwestTransport::send(request_builder).await.unwrap_err();
+        assert!(matches!(err, TransportError::Network(_)));
     }
 }
