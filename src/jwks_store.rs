@@ -202,55 +202,7 @@ impl<T: HttpGet> JwksStore<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::transport::test_fixtures::network_error;
-    use std::sync::Mutex as StdMutex;
-
-    #[derive(Clone)]
-    struct MockTransport {
-        calls: Arc<StdMutex<Vec<String>>>,
-        responses: Arc<StdMutex<Vec<Result<String, TransportError>>>>,
-    }
-
-    impl MockTransport {
-        /// Every call returns the same response.
-        fn returning(body: &str) -> Self {
-            Self::sequence(vec![Ok(body.to_string())])
-        }
-
-        fn failing_with(err: TransportError) -> Self {
-            Self::sequence(vec![Err(err)])
-        }
-
-        /// Each call in turn consumes the next response, in order. Panics if
-        /// the sequence is exhausted — a test that wants the same response
-        /// more than once must list it that many times.
-        fn sequence(responses: Vec<Result<String, TransportError>>) -> Self {
-            Self {
-                calls: Arc::default(),
-                responses: Arc::new(StdMutex::new(responses)),
-            }
-        }
-
-        fn call_count(&self) -> usize {
-            self.calls.lock().unwrap().len()
-        }
-    }
-
-    impl HttpGet for MockTransport {
-        async fn get(
-            &self,
-            url: &str,
-            _headers: &[(&str, &str)],
-            _timeout: Duration,
-        ) -> Result<String, TransportError> {
-            self.calls.lock().unwrap().push(url.to_string());
-            let mut responses = self.responses.lock().unwrap();
-            if responses.is_empty() {
-                panic!("no response configured");
-            }
-            responses.remove(0)
-        }
-    }
+    use crate::transport::test_fixtures::{MockHttpGet, network_error};
 
     fn jwks_body(kid: &str) -> String {
         format!(r#"{{"keys":[{{"kty":"RSA","kid":"{kid}","n":"AQAB","e":"AQAB"}}]}}"#)
@@ -272,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetches_and_caches_key_on_cold_cache() {
-        let transport = MockTransport::returning(&jwks_body("kid-1"));
+        let transport = MockHttpGet::returning(jwks_body("kid-1"));
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
         let key = store.get_key("kid-1").await.unwrap();
@@ -283,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_lookup_for_cached_kid_does_not_refetch() {
-        let transport = MockTransport::returning(&jwks_body("kid-1"));
+        let transport = MockHttpGet::returning(jwks_body("kid-1"));
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
         store.get_key("kid-1").await.unwrap();
@@ -294,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_misses_share_a_single_fetch() {
-        let transport = MockTransport::returning(&jwks_body("kid-1"));
+        let transport = MockHttpGet::returning(jwks_body("kid-1"));
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
         let (first, second) = tokio::join!(store.get_key("kid-1"), store.get_key("kid-1"));
@@ -306,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn cold_fetch_failure_does_not_surface_to_caller() {
-        let transport = MockTransport::failing_with(TransportError::Http {
+        let transport = MockHttpGet::failing_with(TransportError::Http {
             status: 500,
             body: "boom".to_string(),
         });
@@ -320,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn immediate_retry_after_failure_is_suppressed_by_floor() {
-        let transport = MockTransport::failing_with(TransportError::Http {
+        let transport = MockHttpGet::failing_with(TransportError::Http {
             status: 500,
             body: "boom".to_string(),
         });
@@ -334,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_happens_once_min_fetch_interval_elapses() {
-        let transport = MockTransport::sequence(vec![
+        let transport = MockHttpGet::sequence(vec![
             Err(TransportError::Http {
                 status: 500,
                 body: "boom".to_string(),
@@ -356,7 +308,7 @@ mod tests {
     #[tokio::test]
     async fn refetches_a_cached_kid_once_refresh_interval_elapses() {
         let transport =
-            MockTransport::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
+            MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
         let store = JwksStore::new(transport.clone(), very_fast_config());
 
         store.get_key("kid-1").await.unwrap();
@@ -379,7 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_keystore_warms_a_cold_store() {
-        let transport = MockTransport::returning(&jwks_body("kid-1"));
+        let transport = MockHttpGet::returning(jwks_body("kid-1"));
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
         let suggested_wait = store.refresh_keystore().await;
@@ -390,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_immediate_refresh_keystore_call_is_skipped_by_floor_not_by_a_real_refresh() {
-        let transport = MockTransport::returning(&jwks_body("kid-1"));
+        let transport = MockHttpGet::returning(jwks_body("kid-1"));
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
         assert_eq!(
@@ -411,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_kid_after_fresh_fetch_is_invalid_token() {
-        let transport = MockTransport::returning(&jwks_body("kid-1"));
+        let transport = MockHttpGet::returning(jwks_body("kid-1"));
         let store = JwksStore::new(transport, JwksStoreConfig::default());
 
         let result = store.get_key("does-not-exist").await;
@@ -425,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cached_key_survives_a_failed_refresh_after_going_stale() {
-        let transport = MockTransport::sequence(vec![
+        let transport = MockHttpGet::sequence(vec![
             Ok(jwks_body("kid-1")),
             Err(TransportError::Http {
                 status: 500,
@@ -449,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_does_not_surface_to_caller() {
-        let transport = MockTransport::returning("not json");
+        let transport = MockHttpGet::returning("not json".to_string());
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
         let result = store.get_key("kid-1").await;
@@ -460,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_error_does_not_surface_to_caller() {
-        let transport = MockTransport::failing_with(network_error());
+        let transport = MockHttpGet::failing_with(network_error());
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
         let result = store.get_key("kid-1").await;
@@ -471,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_cache_with_failed_refresh_and_unknown_kid_is_cannot_verify() {
-        let transport = MockTransport::sequence(vec![
+        let transport = MockHttpGet::sequence(vec![
             Ok(jwks_body("kid-1")),
             Err(TransportError::Http {
                 status: 500,
@@ -496,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_misses_share_a_single_failed_fetch() {
-        let transport = MockTransport::failing_with(TransportError::Http {
+        let transport = MockHttpGet::failing_with(TransportError::Http {
             status: 500,
             body: "boom".to_string(),
         });

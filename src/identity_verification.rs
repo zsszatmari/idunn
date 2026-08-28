@@ -231,59 +231,10 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
 mod tests {
     use super::*;
     use super::test_fixtures::{TEST_KID, TEST_RSA_PRIVATE_KEY_PEM, jwks_body_including};
-    use crate::transport::TransportError;
-    use crate::transport::test_fixtures::network_error;
+    use crate::transport::test_fixtures::{MockHttpGet, network_error};
     use serde::Serialize;
-    use std::sync::{Arc, Mutex};
 
     const TEST_BUNDLE_ID: &str = "com.example.myapp";
-
-    #[derive(Clone)]
-    enum MockResponse {
-        Success(String),
-        NetworkFailure,
-    }
-
-    #[derive(Clone)]
-    struct MockTransport {
-        calls: Arc<Mutex<usize>>,
-        response: MockResponse,
-    }
-
-    impl MockTransport {
-        fn new(jwks_body: String) -> Self {
-            Self {
-                calls: Arc::default(),
-                response: MockResponse::Success(jwks_body),
-            }
-        }
-
-        fn failing_with_network_error() -> Self {
-            Self {
-                calls: Arc::default(),
-                response: MockResponse::NetworkFailure,
-            }
-        }
-
-        fn call_count(&self) -> usize {
-            *self.calls.lock().unwrap()
-        }
-    }
-
-    impl HttpGet for MockTransport {
-        async fn get(
-            &self,
-            _url: &str,
-            _headers: &[(&str, &str)],
-            _timeout: Duration,
-        ) -> Result<String, TransportError> {
-            *self.calls.lock().unwrap() += 1;
-            match &self.response {
-                MockResponse::Success(body) => Ok(body.clone()),
-                MockResponse::NetworkFailure => Err(network_error()),
-            }
-        }
-    }
 
     #[derive(Serialize)]
     struct TestClaims<'a> {
@@ -334,14 +285,14 @@ mod tests {
         header
     }
 
-    fn client(transport: MockTransport) -> IdentityVerificationClient<MockTransport> {
+    fn client(transport: MockHttpGet) -> IdentityVerificationClient<MockHttpGet> {
         client_with_config(transport, IdentityVerificationConfig::default())
     }
 
     fn client_with_config(
-        transport: MockTransport,
+        transport: MockHttpGet,
         config: IdentityVerificationConfig,
-    ) -> IdentityVerificationClient<MockTransport> {
+    ) -> IdentityVerificationClient<MockHttpGet> {
         IdentityVerificationClient::new(
             TEST_BUNDLE_ID,
             transport,
@@ -354,7 +305,7 @@ mod tests {
     async fn happy_path_with_nonce_returns_identity_and_nonce() {
         let claims = test_claims(Some("expected-nonce"));
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
@@ -375,7 +326,7 @@ mod tests {
     async fn missing_nonce_is_rejected_by_default() {
         let claims = test_claims(None);
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let result = client.verify_identity_token(&token).await;
 
@@ -405,7 +356,7 @@ mod tests {
                 + 3600,
         };
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let result = client.verify_identity_token(&token).await;
 
@@ -421,7 +372,7 @@ mod tests {
         claims.nonce_supported = Some(false);
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
-            MockTransport::new(jwks_body_including(TEST_KID)),
+            MockHttpGet::returning(jwks_body_including(TEST_KID)),
             IdentityVerificationConfig {
                 nonce_policy: NoncePolicy::Strict,
             },
@@ -441,7 +392,7 @@ mod tests {
         claims.nonce_supported = Some(true);
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
-            MockTransport::new(jwks_body_including(TEST_KID)),
+            MockHttpGet::returning(jwks_body_including(TEST_KID)),
             IdentityVerificationConfig {
                 nonce_policy: NoncePolicy::Strict,
             },
@@ -460,7 +411,7 @@ mod tests {
         let claims = test_claims(None);
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
-            MockTransport::new(jwks_body_including(TEST_KID)),
+            MockHttpGet::returning(jwks_body_including(TEST_KID)),
             IdentityVerificationConfig {
                 nonce_policy: NoncePolicy::Permissive,
             },
@@ -477,7 +428,7 @@ mod tests {
         claims.nonce_supported = Some(false);
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
-            MockTransport::new(jwks_body_including(TEST_KID)),
+            MockHttpGet::returning(jwks_body_including(TEST_KID)),
             IdentityVerificationConfig {
                 nonce_policy: NoncePolicy::Permissive,
             },
@@ -494,7 +445,7 @@ mod tests {
         claims.nonce_supported = Some(true);
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
-            MockTransport::new(jwks_body_including(TEST_KID)),
+            MockHttpGet::returning(jwks_body_including(TEST_KID)),
             IdentityVerificationConfig {
                 nonce_policy: NoncePolicy::Permissive,
             },
@@ -514,7 +465,7 @@ mod tests {
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
         header.kid = Some(TEST_KID.to_string());
         let token = sign_token(header, &claims);
-        let transport = MockTransport::new(jwks_body_including(TEST_KID));
+        let transport = MockHttpGet::returning(jwks_body_including(TEST_KID));
         let client = client(transport.clone());
 
         let result = client.verify_identity_token(&token).await;
@@ -534,7 +485,7 @@ mod tests {
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         header.kid = None;
         let token = sign_token(header, &claims);
-        let client = client(MockTransport::new(jwks_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let result = client.verify_identity_token(&token).await;
 
@@ -550,7 +501,7 @@ mod tests {
     async fn apple_unavailable_surfaces_as_cannot_verify_token() {
         let claims = test_claims(Some("expected-nonce"));
         let token = sign_token(rs256_header(), &claims);
-        let transport = MockTransport::failing_with_network_error();
+        let transport = MockHttpGet::failing_with(network_error());
         let client = client(transport.clone());
 
         let result = client.verify_identity_token(&token).await;
@@ -580,7 +531,7 @@ mod tests {
             exp: iat + 3600,
         };
         let token = sign_token(rs256_header(), &claims);
-        let client = client(MockTransport::new(jwks_body_including(TEST_KID)));
+        let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let result = client.verify_identity_token(&token).await;
 

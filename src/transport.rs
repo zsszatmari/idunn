@@ -137,19 +137,77 @@ pub(crate) fn encode_form(pairs: &[(&str, &str)]) -> String {
         .finish()
 }
 
-/// A `TransportError` standing in for Apple being unreachable (connection
-/// refused, timeout, DNS failure, ...) — the exact underlying error never
-/// matters to the code under test, only that it's the `Network` variant.
+/// Shared in-memory test doubles and helpers for the transport traits.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) mod test_fixtures {
-    use super::TransportError;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
+    use super::{HttpGet, TransportError};
+
+    /// A `TransportError` standing in for Apple being unreachable (connection
+    /// refused, timeout, DNS failure, ...) — the exact underlying error never
+    /// matters to the code under test, only that it's the `Network` variant.
     pub(crate) fn network_error() -> TransportError {
         TransportError::Network(Box::new(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "connection refused",
         )))
+    }
+
+    /// In-memory `HttpGet` test double: records the URLs it was asked for and
+    /// serves a fixed sequence of responses, one consumed per call. Implements
+    /// only `HttpGet` (not the full transport) — that is what sets it apart from
+    /// `FakeAppleTransport`.
+    #[derive(Clone)]
+    pub(crate) struct MockHttpGet {
+        calls: Arc<Mutex<Vec<String>>>,
+        responses: Arc<Mutex<Vec<Result<String, TransportError>>>>,
+    }
+
+    impl MockHttpGet {
+        /// A single `Ok` response. This mock serves a strict sequence, so a
+        /// second fetch panics — a test expecting more than one GET must use
+        /// `sequence` and list each response.
+        pub(crate) fn returning(body: String) -> Self {
+            Self::sequence(vec![Ok(body)])
+        }
+
+        /// A single `Err` response; a second fetch panics (see `returning`).
+        pub(crate) fn failing_with(err: TransportError) -> Self {
+            Self::sequence(vec![Err(err)])
+        }
+
+        /// Each call in turn consumes the next response, in order. Panics if
+        /// the sequence is exhausted — a test that wants the same response
+        /// more than once must list it that many times.
+        pub(crate) fn sequence(responses: Vec<Result<String, TransportError>>) -> Self {
+            Self {
+                calls: Arc::default(),
+                responses: Arc::new(Mutex::new(responses)),
+            }
+        }
+
+        pub(crate) fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    impl HttpGet for MockHttpGet {
+        async fn get(
+            &self,
+            url: &str,
+            _headers: &[(&str, &str)],
+            _timeout: Duration,
+        ) -> Result<String, TransportError> {
+            self.calls.lock().unwrap().push(url.to_string());
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                panic!("no response configured");
+            }
+            responses.remove(0)
+        }
     }
 }
 
