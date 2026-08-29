@@ -2,6 +2,7 @@ use thiserror::Error;
 
 /// Error verifying an Apple identity token or exchanging an authorization code.
 /// TODO: do we need all these, especially from the client's perspective?
+/// especially TokenExchangeFailed and/or TokenRevocationFailed
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum IdunnError {
@@ -49,7 +50,9 @@ pub enum InvalidTokenCause {
     /// requires one — either because the policy is `Strict` (a nonce is
     /// required unconditionally), or because it's `Permissive` and the
     /// token's `nonce_supported` claim was `true`.
-    #[error("Apple identity token carries no nonce claim, which the configured nonce policy requires")]
+    #[error(
+        "Apple identity token carries no nonce claim, which the configured nonce policy requires"
+    )]
     MissingNonce,
 }
 

@@ -223,6 +223,7 @@ yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
 mod tests {
     use super::*;
     use super::test_fixtures::{TEST_PUBLIC_KEY_PEM, test_token_config as test_config};
+    use crate::transport::test_fixtures::network_error;
     use jsonwebtoken::{Algorithm, DecodingKey, Validation};
     use std::sync::{Arc, Mutex};
 
@@ -262,34 +263,24 @@ mod tests {
     #[derive(Clone)]
     struct FakeTransport {
         calls: Arc<Mutex<Vec<(String, String)>>>,
-        response: Arc<Mutex<Result<String, TransportError>>>,
+        // `Option` (not the bare `Result`) so `.take()` can move a non-`Clone`
+        // `TransportError::Network` out on the single call each test makes,
+        // rather than needing to clone the response on every call.
+        response: Arc<Mutex<Option<Result<String, TransportError>>>>,
     }
 
     impl FakeTransport {
         fn returning(body: &str) -> Self {
             Self {
                 calls: Arc::default(),
-                response: Arc::new(Mutex::new(Ok(body.to_string()))),
+                response: Arc::new(Mutex::new(Some(Ok(body.to_string())))),
             }
         }
 
         fn failing_with(err: TransportError) -> Self {
             Self {
                 calls: Arc::default(),
-                response: Arc::new(Mutex::new(Err(err))),
-            }
-        }
-    }
-
-    impl FakeTransport {
-        fn respond(&self) -> Result<String, TransportError> {
-            match &*self.response.lock().unwrap() {
-                Ok(body) => Ok(body.clone()),
-                Err(TransportError::Http { status, body }) => Err(TransportError::Http {
-                    status: *status,
-                    body: body.clone(),
-                }),
-                Err(_) => panic!("unsupported error variant in test fake"),
+                response: Arc::new(Mutex::new(Some(Err(err)))),
             }
         }
     }
@@ -306,7 +297,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((url.to_string(), body.to_string()));
-            self.respond()
+            self.response
+                .lock()
+                .unwrap()
+                .take()
+                .expect("no response configured")
         }
     }
 
@@ -380,6 +375,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn surfaces_network_error_on_exchange() {
+        let config = test_config();
+        let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
+        let transport = FakeTransport::failing_with(network_error());
+
+        let result =
+            exchange_authorization_code(&transport, &config, &signing_key, "auth-code").await;
+
+        assert!(matches!(result, Err(IdunnError::NetworkError(_))));
+    }
+
+    #[tokio::test]
     async fn revokes_refresh_token() {
         let config = test_config();
         let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
@@ -418,6 +425,18 @@ mod tests {
                 AppleErrorCode::InvalidGrant
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn surfaces_network_error_on_revocation() {
+        let config = test_config();
+        let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
+        let transport = FakeTransport::failing_with(network_error());
+
+        let result =
+            revoke_refresh_token(&transport, &config, &signing_key, "refresh-token").await;
+
+        assert!(matches!(result, Err(IdunnError::NetworkError(_))));
     }
 
     /// Hits Apple's real `/auth/revoke` endpoint with an unknown, clearly-marked-as-test
