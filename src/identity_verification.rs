@@ -225,14 +225,17 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
             }
         }
 
-        const PRIVATE_RELAY_SUFFIX: &str = "@privaterelay.appleid.com";
+        const PRIVATE_RELAY_SUFFIXES: &[&str] =
+            &["@privaterelay.appleid.com", "@private.icloud.com"];
 
         let email = decoded.claims.email.map(|address| AppleEmail {
             verified: decoded.claims.email_verified.unwrap_or(false),
-            is_private: decoded
-                .claims
-                .is_private_email
-                .unwrap_or_else(|| address.to_ascii_lowercase().ends_with(PRIVATE_RELAY_SUFFIX)),
+            is_private: decoded.claims.is_private_email.unwrap_or_else(|| {
+                let lower = address.to_ascii_lowercase();
+                PRIVATE_RELAY_SUFFIXES
+                    .iter()
+                    .any(|suffix| lower.ends_with(suffix))
+            }),
             address,
         });
 
@@ -317,8 +320,8 @@ Q3WUtrCR4GerrtHhOp4Tdg==\n\
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::*;
     use super::test_fixtures::{TEST_KID, TEST_RSA_PRIVATE_KEY_PEM, jwks_body_including};
+    use super::*;
     use crate::transport::test_fixtures::{MockHttpGet, network_error};
     use serde::Serialize;
     use serde_json::json;
