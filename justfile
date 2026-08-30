@@ -38,3 +38,6 @@ coverage: coverage-tools
 # leave never-taken regions even in fully exercised code.
 coverage-ci min="80": coverage-tools
     cargo +nightly llvm-cov --lcov --output-path lcov.info --fail-under-lines {{ min }}
+
+cargo-deny:
+    cargo deny check
