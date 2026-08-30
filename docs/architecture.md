@@ -7,7 +7,7 @@ TODO: ezt at kell neznem szemelyesen majd
 `idunn` does two things for Sign in with Apple:
 
 1. **Verify identity tokens** (`AppleIdentity`, `verify_identity_token`, `src/identity_verification.rs`) — needs only the app's `client_id` (`AppleTokenConfig::client_id`), checked against Apple's own published keys via idunn's own `JwksStore` and `jsonwebtoken`-based verification.
-2. **Exchange an authorization code for tokens** (`AppleTokenResponse`, `exchange_authorization_code`, `src/token_exchange.rs`) — needs a signed JWT client secret, which requires `team_id`, `key_id`, `client_id` and Apple's private key (`.p8`).
+2. **Exchange an authorization code for tokens** (`VerifiedAuthorization`, `exchange_authorization_code`, `src/token_exchange.rs`) — needs a signed JWT client secret, which requires `team_id`, `key_id`, `client_id` and Apple's private key (`.p8`).
 
 These two features barely touch the same code, which is why they live in separate submodules. They are nonetheless exposed through a single `AppleAuthClient` with a single constructor, rather than two independent client types, for one reason: **Apple requires apps to support account-deletion / token-revocation** (see [TN3194](https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple) and the [revoke-tokens REST API](https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens), both linked at the top of `src/lib.rs`). Revocation needs the very refresh token this feature fetches, plus the same client-secret-signing credentials as the exchange call.
 
@@ -63,6 +63,24 @@ idunn does, however, enforce nonce *presence*, controlled by `NoncePolicy` (part
 - `NoncePolicy::Permissive`: follows the handling Apple's own docs suggest (https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token, `nonce_supported`) — a missing nonce is tolerated (`AppleIdentity::nonce` is `None`) only when `nonce_supported` is `false` or absent; a `nonce_supported: true` claim still fails the token even under this policy, since Apple's guidance is to treat the nonce as mandatory in that case.
 
 When `nonce` is `None` under `Permissive`, `AppleIdentity::issued_at`/`expiration` (from the token's `iat`/`exp` claims) are exposed so the caller can still build its own replay-detection window (e.g. dedupe on the token itself within that range) instead of having no signal at all.
+
+The same `NoncePolicy` also governs the `id_token` `exchange_authorization_code` gets back from Apple's token endpoint (see the section below) — there is only one verification path, not two with different rules.
+
+## Why token exchange verifies the identity token itself
+
+`exchange_authorization_code` used to hand Apple's token-endpoint response straight back to the caller as `AppleTokenResponse { access_token, refresh_token, id_token, expires_in }` — including the raw, unverified `id_token`. That put the crate's own reason for existing at risk: idunn already owns a conformant verifier (`verify_identity_token`), so exposing an unverified JWT invited exactly the mistake the crate is meant to prevent — a caller reading claims off a token whose signature, `iss`, `aud` and `exp` were never checked.
+
+`exchange_authorization_code` now runs `verify_identity_token` on the `id_token` before returning, and the public result is `VerifiedAuthorization { refresh_token, identity: AppleIdentity }` — no raw `id_token` field at all. It is defined in `lib.rs`, not `token_exchange.rs`, so that module still needs no `identity_verification` import, keeping the two modules as disjoint as `verify_identity_token`'s own section above describes.
+
+`access_token` and `expires_in` are dropped from the result entirely, not just hidden: idunn never uses the access token, and `expires_in` describes only that access token's lifetime. `RawTokenResponse` (the JSON deserialize target) stops declaring those two fields too — `serde` ignores the unknown fields Apple's response still sends, which `token_exchange.rs`'s own test fixture deliberately keeps sending to pin that.
+
+**Consequence worth knowing:** because the exchange's `id_token` now goes through the same `NoncePolicy`-governed check as `verify_identity_token`, an authorization flow that never sends a `nonce` in its authorize request will fail every `exchange_authorization_code` call under the default `NoncePolicy::Strict` — previously this succeeded, because nothing verified the token at all. Such integrations need `NoncePolicy::Permissive`.
+
+Rejected alternative: skip nonce-*presence* enforcement specifically on the exchange path, on the theory that this `id_token` arrives directly from Apple's token endpoint over TLS in response to the server's own POST, not from an untrusted client — the replay threat `NoncePolicy` exists for (see above) isn't present here. Rejected in favor of one uniform verification rule with no config-dependent divergence in what "verified" means, at the cost of the behavior change just described.
+
+**Why verification failure carries the refresh token:** if the exchange succeeds but the `id_token` fails verification, Apple has already issued a live refresh token against a now-consumed authorization code. Returning a plain error and dropping that token would leave it un-revocable — in direct tension with Apple's mandatory account-deletion/revocation requirement (TN3194, see the top of `src/lib.rs`). `IdunnError::ExchangedTokenUnverified { refresh_token, cause }` carries the token instead, so the caller can revoke it via `revoke_refresh_token` — retrying on failure until it succeeds — rather than losing track of a live grant.
+
+Every refresh token idunn hands back — success or error — is wrapped in `RefreshToken` (`src/token_exchange.rs`, next to `AppleTokenConfig` since both originate there), not a plain `String`: a derived `Debug` would print live credential material wherever the value ends up, and errors in particular get `{:?}`-printed into logs, `anyhow` chains and `unwrap()` panic messages by convention. `RefreshToken` has a hand-written, redacting `Debug` (no `Display` either, for the same reason) and no public constructor, so `VerifiedAuthorization::refresh_token` and `IdunnError::ExchangedTokenUnverified`'s copy are both safe by construction rather than by each caller remembering not to log the raw string. This mirrors `AppleTokenConfig`'s existing hand-written `Debug` for `private_key_pem`.
 
 ## Why the email claims are one struct and the flags aren't optional
 

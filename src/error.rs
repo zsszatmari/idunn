@@ -1,3 +1,4 @@
+use crate::token_exchange::RefreshToken;
 use thiserror::Error;
 
 /// Error verifying an Apple identity token or exchanging an authorization code.
@@ -27,6 +28,20 @@ pub enum IdunnError {
     TokenRevocationFailed(AppleErrorCode),
     #[error("could not parse Apple token response: {0}")]
     InvalidTokenResponse(serde_json::Error),
+    /// The authorization code was exchanged successfully, but the `id_token`
+    /// Apple returned with it failed verification.
+    ///
+    /// Carries `refresh_token` because the code has already been consumed and
+    /// the token is live at Apple: the caller must revoke it with
+    /// `AppleAuthClient::revoke_refresh_token`, retrying later on failure until
+    /// the revocation succeeds. Dropping this error without doing so leaves a
+    /// live token that can't revoked in a nice way.
+    #[error("authorization code exchanged, but its identity token failed verification")]
+    ExchangedTokenUnverified {
+        refresh_token: RefreshToken,
+        #[source]
+        cause: Box<IdunnError>,
+    },
 }
 
 /// Why an Apple identity token was found to be invalid. Only the causes this

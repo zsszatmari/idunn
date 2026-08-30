@@ -70,21 +70,53 @@ impl std::fmt::Debug for AppleTokenConfig {
     }
 }
 
-/// Tokens returned by Apple after exchanging an authorization code.
-#[derive(Debug, Clone)]
-pub struct AppleTokenResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub id_token: String,
-    pub expires_in: u64,
+/// A refresh token issued by Apple.
+///
+/// Wrapped rather than a bare `String` so it can't print live credential
+/// material through a derived `Debug` wherever it ends up — both
+/// `VerifiedAuthorization::refresh_token` (a success value that might still be
+/// logged) and `IdunnError::ExchangedTokenUnverified` (an error, which gets
+/// `{:?}`-printed into logs, `anyhow` chains and `unwrap()` panic messages by
+/// convention). Deliberately has no `Display` impl either, for the same
+/// reason. Reach for the value explicitly through `as_str`/`into_inner`.
+#[derive(Clone)]
+pub struct RefreshToken(String);
+
+impl RefreshToken {
+    pub(crate) fn new(token: String) -> Self {
+        Self(token)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
+impl std::fmt::Debug for RefreshToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RefreshToken(<redacted>)")
+    }
+}
+
+/// What Apple's token endpoint returns, before the identity token is verified.
+/// Crate-internal: the `id_token` never reaches a caller unverified — see
+/// `AppleAuthClient::exchange_authorization_code`.
+pub(crate) struct ExchangedTokens {
+    pub(crate) refresh_token: RefreshToken,
+    pub(crate) id_token: String,
+}
+
+/// Only `refresh_token`/`id_token` are captured: idunn doesn't use the access
+/// token or its `expires_in`, and `serde` ignores the unlisted fields rather
+/// than requiring them to be absent.
 #[derive(Deserialize)]
 struct RawTokenResponse {
-    access_token: String,
     refresh_token: String,
     id_token: String,
-    expires_in: u64,
 }
 
 #[derive(Serialize)]
@@ -118,12 +150,12 @@ pub fn build_client_secret(
         .map_err(IdunnError::ClientSecretSigningFailed)
 }
 
-pub async fn exchange_authorization_code<T: HttpPost>(
+pub(crate) async fn exchange_authorization_code<T: HttpPost>(
     transport: &T,
     config: &AppleTokenConfig,
     signing_key: &EncodingKey,
     authorization_code: &str,
-) -> Result<AppleTokenResponse, IdunnError> {
+) -> Result<ExchangedTokens, IdunnError> {
     let client_secret = build_client_secret(config, signing_key)?;
     let form = [
         ("client_id", config.client_id.as_str()),
@@ -148,11 +180,9 @@ pub async fn exchange_authorization_code<T: HttpPost>(
         })?;
     let raw: RawTokenResponse =
         serde_json::from_str(&response_body).map_err(IdunnError::InvalidTokenResponse)?;
-    Ok(AppleTokenResponse {
-        access_token: raw.access_token,
-        refresh_token: raw.refresh_token,
+    Ok(ExchangedTokens {
+        refresh_token: RefreshToken::new(raw.refresh_token),
         id_token: raw.id_token,
-        expires_in: raw.expires_in,
     })
 }
 
@@ -317,10 +347,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.access_token, "at");
-        assert_eq!(response.refresh_token, "rt");
+        assert_eq!(response.refresh_token.as_str(), "rt");
         assert_eq!(response.id_token, "it");
-        assert_eq!(response.expires_in, 3600);
 
         let calls = transport.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);

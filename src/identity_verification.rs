@@ -13,10 +13,12 @@ pub struct AppleIdentity {
     pub apple_user_id: String,
     /// Only reliably present on the user's first authorization.
     pub email: Option<AppleEmail>,
-    /// Apple's fraud-mitigation signal (`real_user_status` claim). `Unsupported`
-    /// when the claim is absent — it isn't sent for web-based apps or below iOS
-    /// 14 / macOS 11.
-    pub real_user_status: RealUserStatus,
+    /// Apple's fraud-mitigation signal (`real_user_status` claim). `None`
+    /// when the claim is absent — it isn't sent for web-based apps or below
+    /// iOS 14 / macOS 11 — or when it carries a value this crate doesn't
+    /// recognize ("Unknown" means Apple hasn't yet determined whether the
+    /// user is real; `None` means Apple didn't tell us this time).
+    pub real_user_status: Option<RealUserStatus>,
     /// The token's `nonce` claim, if present. Comparing it against whatever
     /// nonce the caller generated for this authentication attempt is the
     /// caller's responsibility. `None` only occurs when `NoncePolicy::Permissive`
@@ -62,9 +64,6 @@ pub enum RealUserStatus {
     Unknown,
     /// Apple's `2`.
     LikelyReal,
-    /// A value Apple has added since this was written; carried through
-    /// unchanged rather than failing the token.
-    Other(i64),
 }
 
 /// Controls how `verify_identity_token` handles a token with no `nonce`
@@ -240,10 +239,11 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
         });
 
         let real_user_status = match decoded.claims.real_user_status {
-            None | Some(0) => RealUserStatus::Unsupported,
-            Some(1) => RealUserStatus::Unknown,
-            Some(2) => RealUserStatus::LikelyReal,
-            Some(other) => RealUserStatus::Other(other),
+            None => None,
+            Some(0) => Some(RealUserStatus::Unsupported),
+            Some(1) => Some(RealUserStatus::Unknown),
+            Some(2) => Some(RealUserStatus::LikelyReal),
+            Some(_) => None,
         };
 
         Ok(AppleIdentity {
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(email.address, "user@example.com");
         assert!(!email.verified);
         assert!(!email.is_private);
-        assert_eq!(identity.real_user_status, RealUserStatus::Unsupported);
+        assert_eq!(identity.real_user_status, None);
         assert_eq!(identity.nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(
             identity.issued_at,
@@ -564,14 +564,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_user_status_absent_is_unsupported() {
+    async fn real_user_status_absent_is_none() {
         let claims = test_claims(Some("expected-nonce"));
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
-        assert_eq!(identity.real_user_status, RealUserStatus::Unsupported);
+        assert_eq!(identity.real_user_status, None);
     }
 
     #[tokio::test]
@@ -588,12 +588,12 @@ mod tests {
 
             let identity = client.verify_identity_token(&token).await.unwrap();
 
-            assert_eq!(identity.real_user_status, expected);
+            assert_eq!(identity.real_user_status, Some(expected));
         }
     }
 
     #[tokio::test]
-    async fn real_user_status_unknown_value_is_preserved_as_other() {
+    async fn real_user_status_unknown_value_is_none() {
         let mut claims = test_claims(Some("expected-nonce"));
         claims.real_user_status = Some(777);
         let token = sign_token(rs256_header(), &claims);
@@ -601,7 +601,7 @@ mod tests {
 
         let identity = client.verify_identity_token(&token).await.unwrap();
 
-        assert_eq!(identity.real_user_status, RealUserStatus::Other(777));
+        assert_eq!(identity.real_user_status, None);
     }
 
     #[tokio::test]

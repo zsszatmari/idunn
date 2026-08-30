@@ -13,12 +13,26 @@ pub use error::{AppleErrorCode, IdunnError, InvalidTokenCause};
 pub use identity_verification::{
     AppleEmail, AppleIdentity, IdentityVerificationConfig, NoncePolicy, RealUserStatus,
 };
-pub use token_exchange::{AppleTokenConfig, AppleTokenResponse};
 use jwks_store::JwksStoreConfig;
+pub use token_exchange::{AppleTokenConfig, RefreshToken};
 use transport::HttpTransport;
 
 use jsonwebtoken::EncodingKey;
 use std::sync::Arc;
+
+/// A Sign in with Apple authorization that was exchanged **and** verified.
+///
+/// Only constructible through `AppleAuthClient::exchange_authorization_code`, so
+/// holding one means the identity below already passed `verify_identity_token` —
+/// signature, `iss`, `aud` and `exp` all checked against Apple's published keys.
+#[derive(Debug, Clone)]
+pub struct VerifiedSignIn {
+    /// Apple's refresh token. Store it: revoking it is how an app satisfies
+    /// Apple's mandatory account-deletion requirement (TN3194).
+    pub refresh_token: RefreshToken,
+    /// The identity from the exchange's `id_token`, already verified.
+    pub identity: AppleIdentity,
+}
 
 /// The credential material for signing client secrets: the config and the
 /// `EncodingKey` derived from its `.p8` key. Grouped behind one `Arc` so
@@ -106,18 +120,37 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     }
 
     /// Exchange an authorization code (from `ASAuthorizationAppleIDCredential`)
-    /// for Apple's access/refresh/id tokens.
+    /// for Apple's refresh token, and verify the `id_token` returned alongside
+    /// it the same way `verify_identity_token` does — this call also performs a
+    /// JWKS fetch (served from the shared cache after the first), so it can
+    /// fail with `CannotVerifyToken` in addition to the token-exchange errors.
+    ///
+    /// If the exchange succeeds but verification fails, Apple has already
+    /// issued a live refresh token against a now-consumed authorization code;
+    /// the returned `IdunnError::ExchangedTokenUnverified` carries that token
+    /// so the caller can revoke it (`revoke_refresh_token`) instead of losing
+    /// track of it.
     pub async fn exchange_authorization_code(
         &self,
         authorization_code: &str,
-    ) -> Result<AppleTokenResponse, IdunnError> {
-        token_exchange::exchange_authorization_code(
+    ) -> Result<VerifiedSignIn, IdunnError> {
+        let tokens = token_exchange::exchange_authorization_code(
             &self.transport,
             &self.credentials.token_config,
             &self.credentials.signing_key,
             authorization_code,
         )
-        .await
+        .await?;
+        match self.verify_identity_token(&tokens.id_token).await {
+            Ok(identity) => Ok(VerifiedSignIn {
+                refresh_token: tokens.refresh_token,
+                identity,
+            }),
+            Err(cause) => Err(IdunnError::ExchangedTokenUnverified {
+                refresh_token: tokens.refresh_token,
+                cause: Box::new(cause),
+            }),
+        }
     }
 
     /// Revoke a refresh token previously issued by Apple (e.g. on sign-out or account
@@ -358,12 +391,16 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_authorization_code_posts_a_signed_client_secret_and_returns_the_tokens() {
+        let config = test_token_config();
+        let (id_token, _, _) = signed_identity_token(&config.client_id);
         let transport = FakeAppleTransport::new(
-            "",
-            r#"{"access_token":"at","refresh_token":"rt","id_token":"it","expires_in":3600}"#,
+            jwks_body_including(TEST_KID),
+            format!(
+                r#"{{"access_token":"at","refresh_token":"rt","id_token":"{id_token}","expires_in":3600}}"#
+            ),
         );
         let client = AppleAuthClient::with_transport(
-            test_token_config(),
+            config,
             transport.clone(),
             JwksStoreConfig::default(),
             IdentityVerificationConfig::default(),
@@ -375,10 +412,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.access_token, "at");
-        assert_eq!(response.refresh_token, "rt");
-        assert_eq!(response.id_token, "it");
-        assert_eq!(response.expires_in, 3600);
+        assert_eq!(response.refresh_token.as_str(), "rt");
+        assert_eq!(response.identity.apple_user_id, "apple-user-1");
 
         let posts = transport.posts();
         assert_eq!(posts.len(), 1);
@@ -394,6 +429,37 @@ mod tests {
             Some("com.example.myapp")
         );
         assert_client_secret_matches_config(&form_field(body, "client_secret").unwrap());
+    }
+
+    /// A successfully exchanged but unverifiable `id_token` must not silently
+    /// drop the refresh token Apple already issued: the error variant is the
+    /// only place left to hand it back so the caller can revoke it.
+    #[tokio::test]
+    async fn exchange_authorization_code_carries_the_refresh_token_when_verification_fails() {
+        let transport = FakeAppleTransport::new(
+            jwks_body_including(TEST_KID),
+            r#"{"access_token":"at","refresh_token":"rt","id_token":"it","expires_in":3600}"#,
+        );
+        let client = AppleAuthClient::with_transport(
+            test_token_config(),
+            transport,
+            JwksStoreConfig::default(),
+            IdentityVerificationConfig::default(),
+        )
+        .expect("valid test key should construct client");
+
+        let result = client.exchange_authorization_code("auth-code").await;
+
+        match result {
+            Err(IdunnError::ExchangedTokenUnverified {
+                refresh_token,
+                cause,
+            }) => {
+                assert_eq!(refresh_token.as_str(), "rt");
+                assert!(matches!(*cause, IdunnError::InvalidToken(_)));
+            }
+            other => panic!("expected ExchangedTokenUnverified, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -415,10 +481,7 @@ mod tests {
         assert_eq!(posts.len(), 1);
         let (url, body) = &posts[0];
         assert_eq!(url, "https://appleid.apple.com/auth/revoke");
-        assert_eq!(
-            form_field(body, "token").as_deref(),
-            Some("refresh-token")
-        );
+        assert_eq!(form_field(body, "token").as_deref(), Some("refresh-token"));
         assert_eq!(
             form_field(body, "token_type_hint").as_deref(),
             Some("refresh_token")
