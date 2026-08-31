@@ -557,6 +557,23 @@ mod tests {
         assert_zeroize_on_drop::<AppleTokenConfig>();
     }
 
+    #[test]
+    fn refresh_token_into_inner_returns_the_wrapped_string() {
+        let token = RefreshToken::new("rt-value".to_string());
+
+        assert_eq!(token.into_inner(), "rt-value");
+    }
+
+    #[test]
+    fn refresh_token_debug_redacts_the_value() {
+        let token = RefreshToken::new("rt-value".to_string());
+
+        let rendered = format!("{token:?}");
+
+        assert_eq!(rendered, "RefreshToken(<redacted>)");
+        assert!(!rendered.contains("rt-value"));
+    }
+
     /// The hand-written `Debug` shows the non-secret identifiers but must never
     /// render any of the key material.
     #[test]
