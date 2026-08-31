@@ -1,0 +1,6 @@
+{
+  "name": "idunn",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "dev",
+  "updateRemoteUserUID": true
+}
