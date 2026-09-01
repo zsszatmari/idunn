@@ -1,7 +1,5 @@
 FROM rust:1-slim-trixie
 
-RUN rustup component add rust-analyzer rust-src clippy rustfmt
-
 # Non-root user. uid/gid 1000 is the typical first human user on a Linux host;
 # if it differs, the devcontainer CLI's `updateRemoteUserUID` adjusts it.
 ARG USERNAME=dev
@@ -16,8 +14,21 @@ RUN groupadd --gid 1000 $USERNAME \
       build-essential \
       cmake \
       perl \
- && rm -rf /var/lib/apt/lists/* \
+      just \
+    && rm -rf /var/lib/apt/lists/* \
  && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
  && chmod 0440 /etc/sudoers.d/$USERNAME
+
+RUN rustup component add rust-analyzer rust-src clippy rustfmt
+# nightly needed for coverage,#cfg[coverage(off)] is unsupported on stable
+RUN rustup toolchain install nightly --component llvm-tools
+RUN cargo +stable install --locked \
+      cargo-llvm-cov \
+      cargo-hack \
+      cargo-minimal-versions \
+      cargo-deny
+
+# Restore write access so the non-root user can use the shared registry and toolchains.
+RUN chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
 
 USER $USERNAME
