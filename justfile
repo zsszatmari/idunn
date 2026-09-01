@@ -24,7 +24,7 @@ check-all: check-powerset test-features test-minimal-versions
 coverage:
     @rustup run nightly true 2>/dev/null \
       || { echo "error: nightly toolchain missing (needed for coverage(off)); install with 'rustup toolchain install nightly --component llvm-tools'"; exit 1; }
-    cargo +nightly llvm-cov --html
+    cargo +nightly llvm-cov --branch --html
 
 # Machine-readable coverage plus a line-coverage gate, for CI.
 # Region coverage is deliberately NOT gated: matches!, assert!, ? and derives
@@ -32,7 +32,7 @@ coverage:
 coverage-ci min="90":
     @rustup run nightly true 2>/dev/null \
       || { echo "error: nightly toolchain missing (needed for coverage(off)); install with 'rustup toolchain install nightly --component llvm-tools'"; exit 1; }
-    cargo +nightly llvm-cov --lcov --output-path lcov.info --fail-under-lines {{ min }}
+    cargo +nightly llvm-cov --branch --lcov --output-path lcov.info --fail-under-lines {{ min }}
 
 cargo-deny:
     cargo deny check

@@ -6,7 +6,7 @@ use arc_swap::ArcSwapOption;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::jwk::JwkSet;
 
-use crate::error::{IdunnError, InvalidTokenCause};
+use crate::error::{InvalidTokenCause, VerificationError};
 use crate::transport::{HttpGet, TransportError};
 
 const JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
@@ -82,7 +82,7 @@ impl<T: HttpGet> JwksStore<T> {
     /// Returns the decoding key Apple published for `kid`, fetching/refreshing
     /// the cached key set if needed. Concurrent misses share one in-flight
     /// fetch via `network_request_mutex` instead of each hitting Apple.
-    pub async fn get_key(&self, kid: &str) -> Result<DecodingKey, IdunnError> {
+    pub async fn get_key(&self, kid: &str) -> Result<DecodingKey, VerificationError> {
         if !self.is_stale()
             && let Some(key) = self.cached_key(kid)
         {
@@ -105,32 +105,50 @@ impl<T: HttpGet> JwksStore<T> {
                 // there) or inconclusive (stale/never-fetched, we just don't
                 // know).
                 if cached.fetched_at.elapsed() < self.config.refresh_interval {
-                    Err(IdunnError::InvalidToken(InvalidTokenCause::InvalidKeyId {
-                        kid: Some(kid.to_string()),
-                    }))
+                    Err(VerificationError::InvalidToken(
+                        InvalidTokenCause::InvalidKeyId {
+                            kid: Some(kid.to_string()),
+                        },
+                    ))
                 } else {
-                    Err(IdunnError::CannotVerifyToken)
+                    Err(VerificationError::CannotVerifyToken)
                 }
             }
-            None => Err(IdunnError::CannotVerifyToken),
+            None => Err(VerificationError::CannotVerifyToken),
         }
     }
 
-    /// Refreshes the cached key set now, ignoring `refresh_interval` (only
-    /// `cooldown_period` applies). Optional to call: `get_key` already
-    /// refreshes on demand. Useful for callers that want to warm the cache at
-    /// startup and/or drive periodic refresh on their own schedule.
+    /// Refreshes the cached key set now, unless the current snapshot is still
+    /// within `refresh_interval` (see below). Optional to call: `get_key`
+    /// already refreshes on demand. Useful for callers that want to warm the
+    /// cache at startup and/or drive periodic refresh on their own schedule.
     ///
     /// Returns how long the caller should wait before calling again: a
     /// successful fetch suggests `refresh_interval`, tracking `get_key`'s own
     /// lazy-refresh cadence; a failed or cooldown-skipped attempt suggests
     /// `cooldown_period`, the earliest a retry is allowed anyway.
+    ///
+    /// If the current snapshot is still within `refresh_interval`, this skips
+    /// `try_refresh()` entirely — the caller is early — and returns the time
+    /// remaining until `refresh_interval` elapses instead.
     pub async fn refresh_keystore(&self) -> Duration {
+        if let Some(remaining) = self.remaining_until_refresh_due() {
+            return remaining;
+        }
+
         if self.try_refresh().await {
             self.config.refresh_interval
         } else {
             self.config.cooldown_period
         }
+    }
+
+    /// `Some(remaining)` if there's a cached snapshot younger than
+    /// `refresh_interval`, i.e. a refresh attempt right now would be premature.
+    fn remaining_until_refresh_due(&self) -> Option<Duration> {
+        let cached = self.key_set.load();
+        let elapsed = cached.as_ref()?.fetched_at.elapsed();
+        self.config.refresh_interval.checked_sub(elapsed)
     }
 
     /// Looks `kid` up in the cached snapshot without touching the network.
@@ -172,7 +190,7 @@ impl<T: HttpGet> JwksStore<T> {
 
     /// Fetches and parses Apple's JWKS. Returns `None` (after logging a
     /// warning) on any failure — network error, non-2xx, or malformed body —
-    /// none of which are surfaced to callers as an `IdunnError`.
+    /// none of which are surfaced to callers.
     async fn fetch_keys(&self) -> Option<HashMap<String, DecodingKey>> {
         let body = match self.transport.get(JWKS_URL, &[], REQUEST_TIMEOUT).await {
             Ok(body) => body,
@@ -222,6 +240,16 @@ mod tests {
         }
     }
 
+    /// Refresh interval elapses quickly, but the cooldown floor stays long —
+    /// isolates the cooldown-floor skip from the refresh-interval skip, since
+    /// both would otherwise fire together.
+    fn short_refresh_long_cooldown_config() -> JwksStoreConfig {
+        JwksStoreConfig {
+            refresh_interval: Duration::from_millis(20),
+            cooldown_period: Duration::from_secs(60),
+        }
+    }
+
     #[tokio::test]
     async fn fetches_and_caches_key_on_cold_cache() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
@@ -266,7 +294,7 @@ mod tests {
 
         let result = store.get_key("kid-1").await;
 
-        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 1);
     }
 
@@ -307,8 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn refetches_a_cached_kid_once_refresh_interval_elapses() {
-        let transport =
-            MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
+        let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
         let store = JwksStore::new(transport.clone(), very_fast_config());
 
         store.get_key("kid-1").await.unwrap();
@@ -322,7 +349,7 @@ mod tests {
         assert_eq!(transport.call_count(), 2);
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(
+            Err(VerificationError::InvalidToken(
                 InvalidTokenCause::InvalidKeyId { .. }
             ))
         ));
@@ -341,7 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_immediate_refresh_keystore_call_is_skipped_by_floor_not_by_a_real_refresh() {
+    async fn second_immediate_refresh_keystore_call_is_skipped_without_touching_try_refresh() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
         let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
 
@@ -351,13 +378,31 @@ mod tests {
         );
         assert_eq!(transport.call_count(), 1);
 
-        // The 60s default cooldown_period blocks this second call from
-        // attempting anything, so it reports the cooldown-retry duration,
-        // not another successful refresh.
-        assert_eq!(
-            store.refresh_keystore().await,
-            JwksStoreConfig::default().cooldown_period
-        );
+        // The snapshot is still well within refresh_interval, so this call
+        // must be too early: it should never reach try_refresh() (and thus
+        // never even get to the cooldown check) and instead report roughly
+        // how long is left until refresh_interval elapses.
+        let second_wait = store.refresh_keystore().await;
+        let refresh_interval = JwksStoreConfig::default().refresh_interval;
+        assert!(second_wait <= refresh_interval);
+        assert!(second_wait > refresh_interval - Duration::from_secs(1));
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_keystore_call_after_refresh_interval_elapses_is_skipped_by_cooldown_floor() {
+        let transport = MockHttpGet::returning(jwks_body("kid-1"));
+        let store = JwksStore::new(transport.clone(), short_refresh_long_cooldown_config());
+
+        assert_eq!(store.refresh_keystore().await, Duration::from_millis(20));
+        assert_eq!(transport.call_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // refresh_interval has now elapsed, so this call is no longer "too
+        // early" and reaches try_refresh() — which the 60s cooldown_period
+        // then blocks, since the only attempt so far was ~40ms ago.
+        assert_eq!(store.refresh_keystore().await, Duration::from_secs(60));
         assert_eq!(transport.call_count(), 1);
     }
 
@@ -370,7 +415,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::InvalidKeyId { kid }))
+            Err(VerificationError::InvalidToken(InvalidTokenCause::InvalidKeyId { kid }))
                 if kid.as_deref() == Some("does-not-exist")
         ));
     }
@@ -406,7 +451,7 @@ mod tests {
 
         let result = store.get_key("kid-1").await;
 
-        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 1);
     }
 
@@ -417,7 +462,7 @@ mod tests {
 
         let result = store.get_key("kid-1").await;
 
-        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 1);
     }
 
@@ -442,7 +487,7 @@ mod tests {
         // kid" (confidently absent) — that distinction is only trustworthy
         // after a fresh, successful fetch.
         let result = store.get_key("kid-2").await;
-        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 2);
     }
 
@@ -456,8 +501,8 @@ mod tests {
 
         let (first, second) = tokio::join!(store.get_key("kid-1"), store.get_key("kid-1"));
 
-        assert!(matches!(first, Err(IdunnError::CannotVerifyToken)));
-        assert!(matches!(second, Err(IdunnError::CannotVerifyToken)));
+        assert!(matches!(first, Err(VerificationError::CannotVerifyToken)));
+        assert!(matches!(second, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 1);
     }
 

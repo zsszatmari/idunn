@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppleErrorCode, IdunnError};
+use crate::error::{AppleErrorCode, ClientSecretError, TokenExchangeError, TokenRevocationError};
 use crate::transport::{HttpPost, TransportError, encode_form};
 
 const TOKEN_URL: &str = "https://appleid.apple.com/auth/token";
@@ -75,7 +75,7 @@ impl std::fmt::Debug for AppleTokenConfig {
 /// Wrapped rather than a bare `String` so it can't print live credential
 /// material through a derived `Debug` wherever it ends up — both
 /// `VerifiedAuthorization::refresh_token` (a success value that might still be
-/// logged) and `IdunnError::ExchangedTokenUnverified` (an error, which gets
+/// logged) and `SignInError::ExchangedTokenUnverified` (an error, which gets
 /// `{:?}`-printed into logs, `anyhow` chains and `unwrap()` panic messages by
 /// convention). Deliberately has no `Display` impl either, for the same
 /// reason. Reach for the value explicitly through `as_str`/`into_inner`.
@@ -131,7 +131,7 @@ struct ClientSecretClaims<'a> {
 pub fn build_client_secret(
     config: &AppleTokenConfig,
     signing_key: &EncodingKey,
-) -> Result<String, IdunnError> {
+) -> Result<String, ClientSecretError> {
     // https://developer.apple.com/documentation/accountorganizationaldatasharing/creating-a-client-secret
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(config.key_id.clone());
@@ -146,8 +146,7 @@ pub fn build_client_secret(
         aud: "https://appleid.apple.com",
         sub: &config.client_id,
     };
-    jsonwebtoken::encode(&header, &claims, signing_key)
-        .map_err(IdunnError::ClientSecretSigningFailed)
+    jsonwebtoken::encode(&header, &claims, signing_key).map_err(ClientSecretError::from)
 }
 
 pub(crate) async fn exchange_authorization_code<T: HttpPost>(
@@ -155,7 +154,7 @@ pub(crate) async fn exchange_authorization_code<T: HttpPost>(
     config: &AppleTokenConfig,
     signing_key: &EncodingKey,
     authorization_code: &str,
-) -> Result<ExchangedTokens, IdunnError> {
+) -> Result<ExchangedTokens, TokenExchangeError> {
     let client_secret = build_client_secret(config, signing_key)?;
     let form = [
         ("client_id", config.client_id.as_str()),
@@ -173,13 +172,13 @@ pub(crate) async fn exchange_authorization_code<T: HttpPost>(
         )
         .await
         .map_err(|err| match err {
-            TransportError::Network(e) => IdunnError::NetworkError(e),
+            TransportError::Network(e) => TokenExchangeError::NetworkError(e),
             TransportError::Http { body, .. } => {
-                IdunnError::TokenExchangeFailed(AppleErrorCode::from_response_body(body))
+                TokenExchangeError::TokenExchangeFailed(AppleErrorCode::from_response_body(body))
             }
         })?;
     let raw: RawTokenResponse =
-        serde_json::from_str(&response_body).map_err(IdunnError::InvalidTokenResponse)?;
+        serde_json::from_str(&response_body).map_err(TokenExchangeError::InvalidTokenResponse)?;
     Ok(ExchangedTokens {
         refresh_token: RefreshToken::new(raw.refresh_token),
         id_token: raw.id_token,
@@ -194,7 +193,7 @@ pub async fn revoke_refresh_token<T: HttpPost>(
     config: &AppleTokenConfig,
     signing_key: &EncodingKey,
     refresh_token: &str,
-) -> Result<(), IdunnError> {
+) -> Result<(), TokenRevocationError> {
     let client_secret = build_client_secret(config, signing_key)?;
     let form = [
         ("client_id", config.client_id.as_str()),
@@ -212,10 +211,10 @@ pub async fn revoke_refresh_token<T: HttpPost>(
         )
         .await
         .map_err(|err| match err {
-            TransportError::Network(e) => IdunnError::NetworkError(e),
-            TransportError::Http { body, .. } => {
-                IdunnError::TokenRevocationFailed(AppleErrorCode::from_response_body(body))
-            }
+            TransportError::Network(e) => TokenRevocationError::NetworkError(e),
+            TransportError::Http { body, .. } => TokenRevocationError::TokenRevocationFailed(
+                AppleErrorCode::from_response_body(body),
+            ),
         })?;
     Ok(())
 }
@@ -251,8 +250,8 @@ yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::*;
     use super::test_fixtures::{TEST_PUBLIC_KEY_PEM, test_token_config as test_config};
+    use super::*;
     use crate::transport::test_fixtures::network_error;
     use jsonwebtoken::{Algorithm, DecodingKey, Validation};
     use std::sync::{Arc, Mutex};
@@ -376,7 +375,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::TokenExchangeFailed(
+            Err(TokenExchangeError::TokenExchangeFailed(
                 AppleErrorCode::InvalidGrant
             ))
         ));
@@ -396,7 +395,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::TokenExchangeFailed(
+            Err(TokenExchangeError::TokenExchangeFailed(
                 AppleErrorCode::UnknownError(_)
             ))
         ));
@@ -411,7 +410,7 @@ mod tests {
         let result =
             exchange_authorization_code(&transport, &config, &signing_key, "auth-code").await;
 
-        assert!(matches!(result, Err(IdunnError::NetworkError(_))));
+        assert!(matches!(result, Err(TokenExchangeError::NetworkError(_))));
     }
 
     #[tokio::test]
@@ -449,7 +448,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::TokenRevocationFailed(
+            Err(TokenRevocationError::TokenRevocationFailed(
                 AppleErrorCode::InvalidGrant
             ))
         ));
@@ -461,10 +460,9 @@ mod tests {
         let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
         let transport = FakeTransport::failing_with(network_error());
 
-        let result =
-            revoke_refresh_token(&transport, &config, &signing_key, "refresh-token").await;
+        let result = revoke_refresh_token(&transport, &config, &signing_key, "refresh-token").await;
 
-        assert!(matches!(result, Err(IdunnError::NetworkError(_))));
+        assert!(matches!(result, Err(TokenRevocationError::NetworkError(_))));
     }
 
     /// Hits Apple's real `/auth/revoke` endpoint with an unknown, clearly-marked-as-test

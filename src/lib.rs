@@ -9,7 +9,10 @@ mod jwks_store;
 mod token_exchange;
 mod transport;
 
-pub use error::{AppleErrorCode, IdunnError, InvalidTokenCause};
+pub use error::{
+    AppleErrorCode, ClientSecretError, InvalidPrivateKeyError, InvalidTokenCause, SignInError,
+    TokenExchangeError, TokenRevocationError, VerificationError,
+};
 pub use identity_verification::{
     AppleEmail, AppleIdentity, IdentityVerificationConfig, NoncePolicy, RealUserStatus,
 };
@@ -68,7 +71,7 @@ pub struct AppleAuthClient<T: HttpTransport> {
 
 #[cfg(feature = "reqwest")]
 impl AppleAuthClient<transport::ReqwestTransport> {
-    pub fn new(token_config: AppleTokenConfig) -> Result<Self, IdunnError> {
+    pub fn new(token_config: AppleTokenConfig) -> Result<Self, InvalidPrivateKeyError> {
         Self::with_transport(
             token_config,
             transport::ReqwestTransport::default(),
@@ -78,15 +81,16 @@ impl AppleAuthClient<transport::ReqwestTransport> {
     }
 }
 
+// TODO: think about the order of constructor arguments
 impl<T: HttpTransport> AppleAuthClient<T> {
     pub fn with_transport(
         token_config: AppleTokenConfig,
         transport: T,
         jwks_config: JwksStoreConfig,
         identity_verification_config: IdentityVerificationConfig,
-    ) -> Result<Self, IdunnError> {
+    ) -> Result<Self, InvalidPrivateKeyError> {
         let signing_key = EncodingKey::from_ec_pem(&token_config.private_key_pem)
-            .map_err(IdunnError::InvalidPrivateKey)?;
+            .map_err(InvalidPrivateKeyError::from)?;
         let identity_verification =
             Arc::new(identity_verification::IdentityVerificationClient::new(
                 &token_config.client_id,
@@ -104,16 +108,18 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         })
     }
 
-    pub async fn refresh_keystore(&self) -> Result<(), IdunnError> {
-        self.identity_verification.refresh_keystore().await;
-        Ok(())
+    /// Returns how long the caller should wait before calling again — see
+    /// `JwksStore::refresh_keystore` for what that duration means and when a
+    /// call is skipped for arriving too early.
+    pub async fn refresh_keystore(&self) -> std::time::Duration {
+        self.identity_verification.refresh_keystore().await
     }
 
     /// Validate and decode an Apple identity JWT.
     pub async fn verify_identity_token(
         &self,
         identity_token: &str,
-    ) -> Result<AppleIdentity, IdunnError> {
+    ) -> Result<AppleIdentity, VerificationError> {
         self.identity_verification
             .verify_identity_token(identity_token)
             .await
@@ -127,13 +133,13 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     ///
     /// If the exchange succeeds but verification fails, Apple has already
     /// issued a live refresh token against a now-consumed authorization code;
-    /// the returned `IdunnError::ExchangedTokenUnverified` carries that token
+    /// the returned `SignInError::ExchangedTokenUnverified` carries that token
     /// so the caller can revoke it (`revoke_refresh_token`) instead of losing
     /// track of it.
     pub async fn exchange_authorization_code(
         &self,
         authorization_code: &str,
-    ) -> Result<VerifiedSignIn, IdunnError> {
+    ) -> Result<VerifiedSignIn, SignInError> {
         let tokens = token_exchange::exchange_authorization_code(
             &self.transport,
             &self.credentials.token_config,
@@ -146,16 +152,19 @@ impl<T: HttpTransport> AppleAuthClient<T> {
                 refresh_token: tokens.refresh_token,
                 identity,
             }),
-            Err(cause) => Err(IdunnError::ExchangedTokenUnverified {
+            Err(cause) => Err(SignInError::ExchangedTokenUnverified {
                 refresh_token: tokens.refresh_token,
-                cause: Box::new(cause),
+                cause,
             }),
         }
     }
 
     /// Revoke a refresh token previously issued by Apple (e.g. on sign-out or account
     /// deletion) so it can no longer be used.
-    pub async fn revoke_refresh_token(&self, refresh_token: &str) -> Result<(), IdunnError> {
+    pub async fn revoke_refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<(), TokenRevocationError> {
         token_exchange::revoke_refresh_token(
             &self.transport,
             &self.credentials.token_config,
@@ -192,7 +201,7 @@ mod tests {
 
         let result = AppleAuthClient::new(config);
 
-        assert!(matches!(result, Err(IdunnError::InvalidPrivateKey(_))));
+        assert!(matches!(result, Err(InvalidPrivateKeyError(_))));
     }
 
     /// Fake transport serving both verbs `AppleAuthClient` needs: JWKS fetches
@@ -271,8 +280,8 @@ mod tests {
         )
         .expect("valid test key should construct client");
 
-        client.refresh_keystore().await.unwrap();
-        client.clone().refresh_keystore().await.unwrap();
+        client.refresh_keystore().await;
+        client.clone().refresh_keystore().await;
 
         assert_eq!(transport.get_calls(), 1);
     }
@@ -385,7 +394,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::Rejected(_)
+            ))
         ));
     }
 
@@ -451,12 +462,12 @@ mod tests {
         let result = client.exchange_authorization_code("auth-code").await;
 
         match result {
-            Err(IdunnError::ExchangedTokenUnverified {
+            Err(SignInError::ExchangedTokenUnverified {
                 refresh_token,
                 cause,
             }) => {
                 assert_eq!(refresh_token.as_str(), "rt");
-                assert!(matches!(*cause, IdunnError::InvalidToken(_)));
+                assert!(matches!(cause, VerificationError::InvalidToken(_)));
             }
             other => panic!("expected ExchangedTokenUnverified, got {other:?}"),
         }

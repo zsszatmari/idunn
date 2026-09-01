@@ -1,4 +1,4 @@
-use crate::error::{IdunnError, InvalidTokenCause};
+use crate::error::{InvalidTokenCause, VerificationError};
 use crate::jwks_store::{JwksStore, JwksStoreConfig};
 use crate::transport::HttpGet;
 use jsonwebtoken::Validation;
@@ -195,16 +195,16 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
     pub(crate) async fn verify_identity_token(
         &self,
         identity_token: &str,
-    ) -> Result<AppleIdentity, IdunnError> {
+    ) -> Result<AppleIdentity, VerificationError> {
         let decoded_header = jsonwebtoken::decode_header(identity_token)
             .map_err(InvalidTokenCause::Rejected)
-            .map_err(IdunnError::InvalidToken)?;
+            .map_err(VerificationError::InvalidToken)?;
         if decoded_header.alg != jsonwebtoken::Algorithm::RS256 {
-            return Err(IdunnError::InvalidToken(
+            return Err(VerificationError::InvalidToken(
                 InvalidTokenCause::AlgorithmMismatch(decoded_header.alg),
             ));
         }
-        let key_id = decoded_header.kid.ok_or(IdunnError::InvalidToken(
+        let key_id = decoded_header.kid.ok_or(VerificationError::InvalidToken(
             InvalidTokenCause::InvalidKeyId { kid: None },
         ))?;
         let decoding_key = self.jwks_store.get_key(&key_id).await?;
@@ -212,7 +212,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
         let decoded =
             jsonwebtoken::decode::<ApplePayload>(identity_token, &decoding_key, &self.validation)
                 .map_err(InvalidTokenCause::Rejected)
-                .map_err(IdunnError::InvalidToken)?;
+                .map_err(VerificationError::InvalidToken)?;
 
         if decoded.claims.nonce.is_none() {
             let nonce_required = match self.config.nonce_policy {
@@ -220,7 +220,9 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
                 NoncePolicy::Permissive => decoded.claims.nonce_supported == Some(true),
             };
             if nonce_required {
-                return Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce));
+                return Err(VerificationError::InvalidToken(
+                    InvalidTokenCause::MissingNonce,
+                ));
             }
         }
 
@@ -496,7 +498,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::Rejected(_)
+            ))
         ));
     }
 
@@ -511,7 +515,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::Rejected(_)
+            ))
         ));
     }
 
@@ -614,7 +620,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::MissingNonce
+            ))
         ));
     }
 
@@ -644,7 +652,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::Rejected(_)
+            ))
         ));
     }
 
@@ -664,7 +674,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::MissingNonce
+            ))
         ));
     }
 
@@ -684,7 +696,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::MissingNonce
+            ))
         ));
     }
 
@@ -737,7 +751,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::MissingNonce))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::MissingNonce
+            ))
         ));
     }
 
@@ -754,7 +770,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(
+            Err(VerificationError::InvalidToken(
                 InvalidTokenCause::AlgorithmMismatch(jsonwebtoken::Algorithm::HS256)
             ))
         ));
@@ -773,9 +789,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::InvalidKeyId {
-                kid: None
-            }))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::InvalidKeyId { kid: None }
+            ))
         ));
     }
 
@@ -788,7 +804,7 @@ mod tests {
 
         let result = client.verify_identity_token(&token).await;
 
-        assert!(matches!(result, Err(IdunnError::CannotVerifyToken)));
+        assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 1);
     }
 
@@ -819,7 +835,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(IdunnError::InvalidToken(InvalidTokenCause::Rejected(_)))
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::Rejected(_)
+            ))
         ));
     }
 }

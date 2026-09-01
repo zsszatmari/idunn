@@ -1,12 +1,13 @@
 use crate::token_exchange::RefreshToken;
 use thiserror::Error;
 
-/// Error verifying an Apple identity token or exchanging an authorization code.
-/// TODO: do we need all these, especially from the client's perspective?
-/// especially TokenExchangeFailed and/or TokenRevocationFailed
+/// Error verifying an Apple identity token — returned by
+/// `AppleAuthClient::verify_identity_token`, and embedded in
+/// `SignInError::ExchangedTokenUnverified` when it's the `id_token` from a
+/// token exchange that fails verification instead.
 #[non_exhaustive]
 #[derive(Debug, Error)]
-pub enum IdunnError {
+pub enum VerificationError {
     /// The token is confirmed invalid — see `cause` for specifics.
     #[error("invalid Apple identity token: {0}")]
     InvalidToken(InvalidTokenCause),
@@ -16,32 +17,6 @@ pub enum IdunnError {
     /// only that verification couldn't be completed right now.
     #[error("could not verify Apple identity token: key set is unavailable")]
     CannotVerifyToken,
-    #[error("network error: {0}")]
-    NetworkError(Box<dyn std::error::Error + Send + Sync>),
-    #[error("invalid Apple private key: {0}")]
-    InvalidPrivateKey(jsonwebtoken::errors::Error),
-    #[error("failed to sign client secret: {0}")]
-    ClientSecretSigningFailed(jsonwebtoken::errors::Error),
-    #[error("Apple token endpoint returned an error: {0}")]
-    TokenExchangeFailed(AppleErrorCode),
-    #[error("Apple revoke endpoint returned an error: {0}")]
-    TokenRevocationFailed(AppleErrorCode),
-    #[error("could not parse Apple token response: {0}")]
-    InvalidTokenResponse(serde_json::Error),
-    /// The authorization code was exchanged successfully, but the `id_token`
-    /// Apple returned with it failed verification.
-    ///
-    /// Carries `refresh_token` because the code has already been consumed and
-    /// the token is live at Apple: the caller must revoke it with
-    /// `AppleAuthClient::revoke_refresh_token`, retrying later on failure until
-    /// the revocation succeeds. Dropping this error without doing so leaves a
-    /// live token that can't revoked in a nice way.
-    #[error("authorization code exchanged, but its identity token failed verification")]
-    ExchangedTokenUnverified {
-        refresh_token: RefreshToken,
-        #[source]
-        cause: Box<IdunnError>,
-    },
 }
 
 /// Why an Apple identity token was found to be invalid. Only the causes this
@@ -58,7 +33,7 @@ pub enum InvalidTokenCause {
     /// signature, or a claim (issuer/audience/expiry) it doesn't satisfy.
     #[error("Apple identity token failed verification: {0}")]
     Rejected(jsonwebtoken::errors::Error),
-    /// Header declares an algorithm other than the RS256 Apple actually uses.
+    /// Header declares an algorithm other than the RS256 Apple actually uses. Possibly an attack.
     #[error("Apple identity token uses algorithm {0:?} instead of the expected RS256")]
     AlgorithmMismatch(jsonwebtoken::Algorithm),
     /// The token has no `nonce` claim, and the configured `NoncePolicy`
@@ -120,6 +95,73 @@ impl AppleErrorCode {
             _ => AppleErrorCode::UnknownError(body),
         }
     }
+}
+
+/// The configured Apple private key (`AppleTokenConfig::private_key_pem`)
+/// couldn't be parsed as a PEM-encoded EC key — returned by
+/// `AppleAuthClient::new`/`with_transport`.
+#[derive(Debug, Error)]
+#[error("invalid Apple private key: {0}")]
+pub struct InvalidPrivateKeyError(#[from] pub(crate) jsonwebtoken::errors::Error);
+
+/// Signing the client secret sent with every token-exchange/revoke request
+/// failed. In practice this should be unreachable — the private key is
+/// already validated once at `AppleAuthClient::new`/`with_transport` — but
+/// `jsonwebtoken::encode` is itself fallible, so this stays a real error
+/// rather than a `panic!`/`unwrap()`.
+#[derive(Debug, Error)]
+#[error("failed to sign client secret: {0}")]
+pub struct ClientSecretError(#[from] jsonwebtoken::errors::Error);
+
+/// Error from `AppleAuthClient::exchange_authorization_code`'s call to
+/// Apple's token endpoint — the exchange itself; a verification failure of
+/// the resulting `id_token` is `SignInError::ExchangedTokenUnverified`
+/// instead.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum TokenExchangeError {
+    #[error("network error: {0}")]
+    NetworkError(Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    ClientSecretSigningFailed(#[from] ClientSecretError),
+    #[error("Apple token endpoint returned an error: {0}")]
+    TokenExchangeFailed(AppleErrorCode),
+    #[error("could not parse Apple token response: {0}")]
+    InvalidTokenResponse(serde_json::Error),
+}
+
+/// Error from `AppleAuthClient::revoke_refresh_token`.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum TokenRevocationError {
+    #[error("network error: {0}")]
+    NetworkError(Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    ClientSecretSigningFailed(#[from] ClientSecretError),
+    #[error("Apple revoke endpoint returned an error: {0}")]
+    TokenRevocationFailed(AppleErrorCode),
+}
+
+/// Error from `AppleAuthClient::exchange_authorization_code`.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum SignInError {
+    #[error(transparent)]
+    Exchange(#[from] TokenExchangeError),
+    /// The authorization code was exchanged successfully, but the `id_token`
+    /// Apple returned with it failed verification.
+    ///
+    /// Carries `refresh_token` because the code has already been consumed and
+    /// the token is live at Apple: the caller must revoke it with
+    /// `AppleAuthClient::revoke_refresh_token`, retrying later on failure until
+    /// the revocation succeeds. Dropping this error without doing so leaves a
+    /// live token that can't revoked in a nice way.
+    #[error("authorization code exchanged, but its identity token failed verification")]
+    ExchangedTokenUnverified {
+        refresh_token: RefreshToken,
+        #[source]
+        cause: VerificationError,
+    },
 }
 
 #[cfg(test)]
