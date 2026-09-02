@@ -219,12 +219,12 @@ pub async fn revoke_refresh_token<T: HttpPost>(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod test_fixtures {
+pub mod test_fixtures {
     use super::AppleTokenConfig;
 
-    pub(crate) const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+    pub const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQggeco4/EEIM9ovqMW\n\
 csOfc9dl5tGk8LndzgU4CVvEqLihRANCAAQNSRZdtAsSZG8pTuLiK7JdLUog/M7I\n\
 zqbgw/e2HmOOuotg2tZP7JoBgnu7rNEplIygqTjYf8pKesYPyHrOj5ae\n\
@@ -232,12 +232,12 @@ zqbgw/e2HmOOuotg2tZP7JoBgnu7rNEplIygqTjYf8pKesYPyHrOj5ae\n\
 
     /// EC public half matching `TEST_PRIVATE_KEY_PEM`, for tests that need to verify
     /// a client secret idunn signed rather than just producing one.
-    pub(crate) const TEST_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+    pub const TEST_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDUkWXbQLEmRvKU7i4iuyXS1KIPzO\n\
 yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
 -----END PUBLIC KEY-----\n";
 
-    pub(crate) fn test_token_config() -> AppleTokenConfig {
+    pub fn test_token_config() -> AppleTokenConfig {
         AppleTokenConfig {
             team_id: "TEAM123456".to_string(),
             key_id: "KEY7890".to_string(),

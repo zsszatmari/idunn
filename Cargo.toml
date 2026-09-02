@@ -21,6 +21,9 @@ zeroize = { version = "1.9", features = ["derive"] }
 default = ["aws_lc_rs"]
 aws_lc_rs = ["jsonwebtoken/aws_lc_rs"]
 rust_crypto = ["jsonwebtoken/rust_crypto"]
+# Exposes `test_fixtures` to downstream crates so their tests can build an
+# AppleAuthClient without committing a second throwaway key. dev-dependencies only.
+test-fixtures = []
 
 [dev-dependencies]
 env_logger = "0.11"

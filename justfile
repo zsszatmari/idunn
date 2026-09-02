@@ -36,3 +36,6 @@ coverage-ci min="90":
 
 cargo-deny:
     cargo deny check
+
+# TODO: look into cargo-mutants
+# TODO: look into cackle

@@ -16,9 +16,18 @@ pub use error::{
 pub use identity_verification::{
     AppleEmail, AppleIdentity, IdentityVerificationConfig, NoncePolicy, RealUserStatus,
 };
-use jwks_store::JwksStoreConfig;
+pub use jwks_store::JwksStoreConfig;
 pub use token_exchange::{AppleTokenConfig, RefreshToken};
-use transport::HttpTransport;
+pub use transport::{HttpGet, HttpPost, HttpTransport, TransportError};
+
+#[cfg(feature = "reqwest")]
+pub use transport::ReqwestTransport;
+
+/// Test-only fixtures: a throwaway EC P-256 key and a matching `AppleTokenConfig`.
+/// Never enable this feature for a production build — the "private key" here is
+/// committed to this repository and grants nothing.
+#[cfg(feature = "test-fixtures")]
+pub use token_exchange::test_fixtures;
 
 use jsonwebtoken::EncodingKey;
 use std::sync::Arc;
