@@ -29,6 +29,17 @@ pub struct JwksStoreConfig {
     /// kids. Not tied specifically to failure — it rate-limits every attempt.
     /// Important protectionagainst DoS attacks.
     pub cooldown_period: Duration,
+    /// Extra window past `refresh_interval` during which `get_key` keeps
+    /// serving a kid it already holds *without* first attempting a refresh.
+    /// `refresh_interval` only makes the lazy refresh eligible; this is how
+    /// long past that point a cached-kid lookup still short-circuits instead
+    /// of blocking on `try_refresh` (which holds `network_request_mutex` for
+    /// the whole fetch, up to `REQUEST_TIMEOUT`). So a brief refresh outage —
+    /// Apple's endpoint down, or cooldown backoff after a failure — can't add
+    /// fetch latency to logins whose key is already cached. Set to
+    /// `Duration::ZERO` to refresh eagerly. Lookups for a kid
+    /// that *isn't* in the snapshot ignore this and refresh immediately.
+    pub stale_key_grace_period: Duration,
 }
 
 impl Default for JwksStoreConfig {
@@ -36,6 +47,7 @@ impl Default for JwksStoreConfig {
         Self {
             refresh_interval: Duration::from_secs(6 * 60 * 60),
             cooldown_period: Duration::from_secs(60),
+            stale_key_grace_period: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -83,7 +95,14 @@ impl<T: HttpGet> JwksStore<T> {
     /// the cached key set if needed. Concurrent misses share one in-flight
     /// fetch via `network_request_mutex` instead of each hitting Apple.
     pub async fn get_key(&self, kid: &str) -> Result<DecodingKey, VerificationError> {
-        if !self.is_stale()
+        // A cached key short-circuits here while the snapshot is still fresh,
+        // and — thanks to `stale_key_grace_period` — for a while after it goes
+        // stale too. Only once that grace period is also spent does a
+        // cached-kid lookup fall through to a blocking `try_refresh`, so a
+        // brief refresh outage can't stall logins whose kid we already hold.
+        // Callers that want the snapshot kept warmer should drive
+        // `refresh_keystore()` on their own schedule.
+        if !self.past_grace_period()
             && let Some(key) = self.cached_key(kid)
         {
             return Ok(key);
@@ -99,11 +118,13 @@ impl<T: HttpGet> JwksStore<T> {
                     // Apple, it is not a hard expiry on cached keys.
                     return Ok(key.clone());
                 }
-                // kid genuinely absent from the snapshot we have. Use the same
-                // freshness definition as the lazy-refresh trigger to decide
-                // whether that's confident evidence (fresh fetch, truly not
-                // there) or inconclusive (stale/never-fetched, we just don't
-                // know).
+                // kid genuinely absent from the snapshot we have. A fetch
+                // newer than `refresh_interval` is confident evidence it is
+                // truly not there; an older (or never-completed) one leaves us
+                // unsure. Note this is `refresh_interval`, not the wider
+                // grace-period bound: the grace period only governs when a
+                // cached kid stops short-circuiting, not how far we trust a
+                // "not found".
                 if cached.fetched_at.elapsed() < self.config.refresh_interval {
                     Err(VerificationError::InvalidToken(
                         InvalidTokenCause::InvalidKeyId {
@@ -159,13 +180,19 @@ impl<T: HttpGet> JwksStore<T> {
     }
 
     /// True when there's no cached snapshot yet, or the last successful fetch
-    /// is older than `refresh_interval`. Says nothing about which kids are in
-    /// the snapshot — that's `cached_key`'s job.
-    fn is_stale(&self) -> bool {
+    /// is older than `refresh_interval + stale_key_grace_period` — the point
+    /// past which even a kid we still hold no longer short-circuits
+    /// `get_key`'s refresh. Says nothing about which kids are in the snapshot
+    /// — that's `cached_key`'s job.
+    fn past_grace_period(&self) -> bool {
+        let bound = self
+            .config
+            .refresh_interval
+            .saturating_add(self.config.stale_key_grace_period);
         self.key_set
             .load()
             .as_ref()
-            .is_none_or(|cached| cached.fetched_at.elapsed() >= self.config.refresh_interval)
+            .is_none_or(|cached| cached.fetched_at.elapsed() >= bound)
     }
 
     async fn try_refresh(&self) -> bool {
@@ -230,6 +257,7 @@ mod tests {
         JwksStoreConfig {
             refresh_interval: Duration::from_secs(6 * 60 * 60),
             cooldown_period: Duration::from_millis(20),
+            stale_key_grace_period: Duration::ZERO,
         }
     }
 
@@ -237,6 +265,7 @@ mod tests {
         JwksStoreConfig {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_millis(20),
+            stale_key_grace_period: Duration::ZERO,
         }
     }
 
@@ -247,6 +276,19 @@ mod tests {
         JwksStoreConfig {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_secs(60),
+            stale_key_grace_period: Duration::ZERO,
+        }
+    }
+
+    /// Refresh interval elapses quickly, but the grace period on top of it
+    /// stays comfortably longer than the sleeps below — so a kid we already
+    /// hold keeps being served straight from the snapshot after it goes
+    /// stale, without any fetch.
+    fn short_refresh_long_grace_config() -> JwksStoreConfig {
+        JwksStoreConfig {
+            refresh_interval: Duration::from_millis(20),
+            cooldown_period: Duration::from_millis(20),
+            stale_key_grace_period: Duration::from_secs(60),
         }
     }
 
@@ -354,6 +396,71 @@ mod tests {
             ))
         ));
         assert!(store.get_key("kid-2").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cached_kid_within_grace_period_is_served_without_refresh() {
+        let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
+        let store = JwksStore::new(transport.clone(), short_refresh_long_grace_config());
+
+        store.get_key("kid-1").await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // refresh_interval (20ms) has elapsed, but we're well inside the 60s
+        // grace period and kid-1 is still cached — so this is served straight
+        // from the snapshot without contacting Apple.
+        let key = store.get_key("kid-1").await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+        assert_eq!(key.family(), jsonwebtoken::AlgorithmFamily::Rsa);
+    }
+
+    #[tokio::test]
+    async fn cached_kid_past_grace_period_triggers_refresh() {
+        let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
+        let store = JwksStore::new(
+            transport.clone(),
+            JwksStoreConfig {
+                refresh_interval: Duration::from_millis(10),
+                cooldown_period: Duration::from_millis(10),
+                stale_key_grace_period: Duration::from_millis(20),
+            },
+        );
+
+        store.get_key("kid-1").await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(60));
+
+        // Both refresh_interval and the grace period stacked on top of it have
+        // now elapsed, so a cached-kid lookup falls through to a real refresh
+        // that replaces the snapshot with kid-2's set.
+        let result = store.get_key("kid-1").await;
+        assert_eq!(transport.call_count(), 2);
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidToken(
+                InvalidTokenCause::InvalidKeyId { .. }
+            ))
+        ));
+        assert!(store.get_key("kid-2").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_within_grace_period_still_refreshes_immediately() {
+        let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
+        let store = JwksStore::new(transport.clone(), short_refresh_long_grace_config());
+
+        store.get_key("kid-1").await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // The grace period only shields kids already in the snapshot. kid-2
+        // isn't, so even inside the grace window this refreshes right away.
+        assert!(store.get_key("kid-2").await.is_ok());
+        assert_eq!(transport.call_count(), 2);
     }
 
     #[tokio::test]

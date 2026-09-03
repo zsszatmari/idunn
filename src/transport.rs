@@ -239,7 +239,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
 
-        let _ = tokio::spawn(async move {
+        let spawned_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut line = String::new();
             let mut reader = tokio::io::BufReader::new(&mut stream);
@@ -255,7 +255,7 @@ mod tests {
                 b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 14\r\n\r\nmalformed gzip"
             ).await.unwrap();
             stream.flush().await.unwrap();
-            // don't wait for the client, deliberatelyend task, socket is dropped
+            // don't wait for the client, deliberately end task, socket is dropped
         });
 
         let client = reqwest::Client::builder().gzip(true).build().unwrap();
@@ -264,5 +264,7 @@ mod tests {
 
         let err = ReqwestTransport::send(request_builder).await.unwrap_err();
         assert!(matches!(err, TransportError::Network(_)));
+
+        std::mem::drop(spawned_handle);
     }
 }
