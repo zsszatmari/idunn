@@ -40,6 +40,22 @@ pub struct JwksStoreConfig {
     /// `Duration::ZERO` to refresh eagerly. Lookups for a kid
     /// that *isn't* in the snapshot ignore this and refresh immediately.
     pub stale_key_grace_period: Duration,
+    /// Hard upper bound on how old the cached snapshot may be and still be
+    /// trusted at all. Unlike `refresh_interval` and `stale_key_grace_period`
+    /// — which only tune how *eagerly* a refresh is attempted and never stop
+    /// a key we already hold from being honored — this one fails closed: once
+    /// the last successful fetch is older than `max_key_age`, `get_key`
+    /// refuses every kid (even one still present in the snapshot) with
+    /// `CannotVerifyToken` and logs at `error` level.
+    ///
+    /// This caps the blast radius of a prolonged refresh outage (Apple's
+    /// endpoint unreachable for days, or the host's egress broken): without
+    /// it, a snapshot fetched long ago would keep validating tokens forever,
+    /// including tokens signed with a key Apple has since revoked. Should be
+    /// set comfortably larger than `refresh_interval + stale_key_grace_period`
+    /// so it only ever bites when refresh has genuinely been failing for a
+    /// long time.
+    pub max_key_age: Duration,
 }
 
 impl Default for JwksStoreConfig {
@@ -48,6 +64,7 @@ impl Default for JwksStoreConfig {
             refresh_interval: Duration::from_secs(6 * 60 * 60),
             cooldown_period: Duration::from_secs(60),
             stale_key_grace_period: Duration::from_secs(10 * 60),
+            max_key_age: Duration::from_secs(72 * 60 * 60),
         }
     }
 }
@@ -103,6 +120,7 @@ impl<T: HttpGet> JwksStore<T> {
         // Callers that want the snapshot kept warmer should drive
         // `refresh_keystore()` on their own schedule.
         if !self.past_grace_period()
+            && !self.snapshot_past_max_age()
             && let Some(key) = self.cached_key(kid)
         {
             return Ok(key);
@@ -111,6 +129,20 @@ impl<T: HttpGet> JwksStore<T> {
         self.try_refresh().await;
 
         match self.key_set.load().as_ref() {
+            Some(cached) if cached.fetched_at.elapsed() >= self.config.max_key_age => {
+                // Refresh has been failing long enough that the snapshot is
+                // now older than `max_key_age`. Fail closed rather than keep
+                // trusting keys Apple may have revoked in the meantime, and
+                // log loudly so the outage is visible instead of silently
+                // degrading verification.
+                tracing::error!(
+                    snapshot_age = ?cached.fetched_at.elapsed(),
+                    max_key_age = ?self.config.max_key_age,
+                    "Apple's JWKS snapshot is older than max_key_age and cannot be \
+                     refreshed; refusing to verify tokens against a possibly-stale key set"
+                );
+                Err(VerificationError::CannotVerifyToken)
+            }
             Some(cached) => {
                 if let Some(key) = cached.keys.get(kid) {
                     // A key we already have is honored regardless of staleness
@@ -195,6 +227,17 @@ impl<T: HttpGet> JwksStore<T> {
             .is_none_or(|cached| cached.fetched_at.elapsed() >= bound)
     }
 
+    /// True when a snapshot exists but its last successful fetch is older than
+    /// `max_key_age` — the hard cap past which the whole snapshot is refused,
+    /// as opposed to `past_grace_period`, which only governs when a cached-kid
+    /// lookup stops short-circuiting the refresh.
+    fn snapshot_past_max_age(&self) -> bool {
+        self.key_set
+            .load()
+            .as_ref()
+            .is_some_and(|cached| cached.fetched_at.elapsed() >= self.config.max_key_age)
+    }
+
     async fn try_refresh(&self) -> bool {
         let mut last_attempt = self.network_request_mutex.lock().await;
         if let Some(attempted_at) = *last_attempt
@@ -253,11 +296,16 @@ mod tests {
         format!(r#"{{"keys":[{{"kty":"RSA","kid":"{kid}","n":"AQAB","e":"AQAB"}}]}}"#)
     }
 
+    /// A `max_key_age` far larger than any sleep in these tests, so the
+    /// hard-expiry path stays out of the way unless a test opts into it.
+    const LONG_MAX_KEY_AGE: Duration = Duration::from_secs(3600);
+
     fn fast_config() -> JwksStoreConfig {
         JwksStoreConfig {
             refresh_interval: Duration::from_secs(6 * 60 * 60),
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::ZERO,
+            max_key_age: LONG_MAX_KEY_AGE,
         }
     }
 
@@ -266,6 +314,7 @@ mod tests {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::ZERO,
+            max_key_age: LONG_MAX_KEY_AGE,
         }
     }
 
@@ -277,6 +326,7 @@ mod tests {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_secs(60),
             stale_key_grace_period: Duration::ZERO,
+            max_key_age: LONG_MAX_KEY_AGE,
         }
     }
 
@@ -289,6 +339,7 @@ mod tests {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::from_secs(60),
+            max_key_age: LONG_MAX_KEY_AGE,
         }
     }
 
@@ -425,6 +476,7 @@ mod tests {
                 refresh_interval: Duration::from_millis(10),
                 cooldown_period: Duration::from_millis(10),
                 stale_key_grace_period: Duration::from_millis(20),
+                max_key_age: LONG_MAX_KEY_AGE,
             },
         );
 
@@ -549,6 +601,78 @@ mod tests {
         let key_after_failed_refresh = store.get_key("kid-1").await.unwrap();
         assert_eq!(transport.call_count(), 2);
         assert_eq!(key_after_failed_refresh.family(), key.family());
+    }
+
+    #[tokio::test]
+    async fn cached_key_is_refused_once_snapshot_passes_max_key_age() {
+        let transport = MockHttpGet::sequence(vec![
+            Ok(jwks_body("kid-1")),
+            Err(TransportError::Http {
+                status: 500,
+                body: "boom".to_string(),
+            }),
+        ]);
+        let store = JwksStore::new(
+            transport.clone(),
+            JwksStoreConfig {
+                refresh_interval: Duration::from_millis(10),
+                cooldown_period: Duration::from_millis(10),
+                stale_key_grace_period: Duration::ZERO,
+                max_key_age: Duration::from_millis(30),
+            },
+        );
+
+        store.get_key("kid-1").await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        // The snapshot holding kid-1 is now older than max_key_age and the
+        // refresh attempt fails, so even a kid we still hold must be refused
+        // rather than verified against a key set Apple may have revoked from.
+        let result = store.get_key("kid-1").await;
+        assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
+        assert_eq!(transport.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_successful_refresh_lifts_the_max_key_age_refusal() {
+        let transport = MockHttpGet::sequence(vec![
+            Ok(jwks_body("kid-1")),
+            Err(TransportError::Http {
+                status: 500,
+                body: "boom".to_string(),
+            }),
+            Ok(jwks_body("kid-1")),
+        ]);
+        let store = JwksStore::new(
+            transport.clone(),
+            JwksStoreConfig {
+                refresh_interval: Duration::from_millis(10),
+                cooldown_period: Duration::from_millis(10),
+                stale_key_grace_period: Duration::ZERO,
+                max_key_age: Duration::from_millis(30),
+            },
+        );
+
+        store.get_key("kid-1").await.unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Snapshot too old + failing refresh: refused.
+        assert!(matches!(
+            store.get_key("kid-1").await,
+            Err(VerificationError::CannotVerifyToken)
+        ));
+        assert_eq!(transport.call_count(), 2);
+
+        std::thread::sleep(Duration::from_millis(15));
+
+        // Cooldown has elapsed and this refresh succeeds, replacing the
+        // snapshot with a fresh one — verification resumes, the fail-closed
+        // state was not permanent.
+        let key = store.get_key("kid-1").await.unwrap();
+        assert_eq!(key.family(), jsonwebtoken::AlgorithmFamily::Rsa);
+        assert_eq!(transport.call_count(), 3);
     }
 
     #[tokio::test]
