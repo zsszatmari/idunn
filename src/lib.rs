@@ -15,6 +15,7 @@ pub use error::{
 };
 pub use identity_verification::{
     AppleEmail, AppleIdentity, IdentityVerificationConfig, NoncePolicy, RealUserStatus,
+    VerifiedIdentityToken,
 };
 pub use jwks_store::JwksStoreConfig;
 pub use token_exchange::{AppleTokenConfig, RefreshToken};
@@ -32,13 +33,21 @@ pub use token_exchange::test_fixtures;
 use jsonwebtoken::EncodingKey;
 use std::sync::Arc;
 
-/// A Sign in with Apple authorization that was exchanged **and** verified.
+/// What `AppleAuthClient::exchange_authorization_code` carries back: the
+/// refresh token from the exchange plus the identity from the `id_token` Apple
+/// returned alongside it, whose signature, `iss`, `aud` and `exp` idunn
+/// verified against Apple's published keys and whose nonce *presence* it
+/// enforced per the configured `NoncePolicy`.
 ///
-/// Only constructible through `AppleAuthClient::exchange_authorization_code`, so
-/// holding one means the identity below already passed `verify_identity_token` —
-/// signature, `iss`, `aud` and `exp` all checked against Apple's published keys.
+/// Only constructible through `AppleAuthClient::exchange_authorization_code`.
 #[derive(Debug, Clone)]
-pub struct VerifiedSignIn {
+pub struct SignInDetails {
+    /// The `id_token`'s `nonce` claim, verbatim — **not** compared against
+    /// anything. Comparing it against the value you generated for this
+    /// authentication attempt is the one verification step left to you; see
+    /// [`VerifiedIdentityToken::nonce`] for why idunn cannot do it and what
+    /// `None` means.
+    pub nonce: Option<String>,
     /// Apple's refresh token. Store it: revoking it is how an app satisfies
     /// Apple's mandatory account-deletion requirement (TN3194).
     pub refresh_token: RefreshToken,
@@ -124,11 +133,15 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         self.identity_verification.refresh_keystore().await
     }
 
-    /// Validate and decode an Apple identity JWT.
+    /// Verify and decode an Apple identity JWT: its signature (against Apple's
+    /// published JWKS), `iss`, `aud` and `exp` are all checked, and its nonce
+    /// *presence* is enforced per the configured `NoncePolicy`. The nonce
+    /// *value* is **not** compared against anything — that step is left to the
+    /// caller; see [`VerifiedIdentityToken::nonce`].
     pub async fn verify_identity_token(
         &self,
         identity_token: &str,
-    ) -> Result<AppleIdentity, VerificationError> {
+    ) -> Result<VerifiedIdentityToken, VerificationError> {
         self.identity_verification
             .verify_identity_token(identity_token)
             .await
@@ -139,6 +152,8 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     /// it the same way `verify_identity_token` does — this call also performs a
     /// JWKS fetch (served from the shared cache after the first), so it can
     /// fail with `CannotVerifyToken` in addition to the token-exchange errors.
+    /// As with `verify_identity_token`, the `id_token`'s nonce *value* is still
+    /// the caller's to check: it is surfaced as `SignInDetails::nonce`.
     ///
     /// If the exchange succeeds but verification fails, Apple has already
     /// issued a live refresh token against a now-consumed authorization code;
@@ -148,7 +163,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     pub async fn exchange_authorization_code(
         &self,
         authorization_code: &str,
-    ) -> Result<VerifiedSignIn, SignInError> {
+    ) -> Result<SignInDetails, SignInError> {
         let tokens = token_exchange::exchange_authorization_code(
             &self.transport,
             &self.credentials.token_config,
@@ -157,7 +172,8 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         )
         .await?;
         match self.verify_identity_token(&tokens.id_token).await {
-            Ok(identity) => Ok(VerifiedSignIn {
+            Ok(VerifiedIdentityToken { nonce, identity }) => Ok(SignInDetails {
+                nonce,
                 refresh_token: tokens.refresh_token,
                 identity,
             }),
@@ -368,14 +384,15 @@ mod tests {
         )
         .expect("valid test key should construct client");
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let VerifiedIdentityToken { nonce, identity } =
+            client.verify_identity_token(&token).await.unwrap();
 
+        assert_eq!(nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(identity.apple_user_id, "apple-user-1");
         assert_eq!(
             identity.email.as_ref().map(|email| email.address.as_str()),
             Some("user@example.com")
         );
-        assert_eq!(identity.nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(identity.issued_at, UNIX_EPOCH + Duration::from_secs(iat));
         assert_eq!(identity.expiration, UNIX_EPOCH + Duration::from_secs(exp));
     }
@@ -432,6 +449,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(response.nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(response.refresh_token.as_str(), "rt");
         assert_eq!(response.identity.apple_user_id, "apple-user-1");
 

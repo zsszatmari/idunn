@@ -19,22 +19,30 @@ pub struct AppleIdentity {
     /// recognize ("Unknown" means Apple hasn't yet determined whether the
     /// user is real; `None` means Apple didn't tell us this time).
     pub real_user_status: Option<RealUserStatus>,
-    /// The token's `nonce` claim, if present. Comparing it against whatever
-    /// nonce the caller generated for this authentication attempt is the
-    /// caller's responsibility. `None` only occurs when `NoncePolicy::Permissive`
-    /// is configured and the token's `nonce_supported` claim is `false` or
-    /// absent (see `NoncePolicy`) — with the default `NoncePolicy::Strict`, a
-    /// missing nonce is rejected outright instead of ever reaching here. When
-    /// `nonce` is `None`, `issued_at`/`expiration` are the raw material for
-    /// building your own replay-detection window (e.g. dedupe on the token
-    /// itself within the `issued_at..expiration` range).
-    pub nonce: Option<String>,
     /// When the token was issued (JWT `iat`).
     pub issued_at: SystemTime,
     /// When the token expires (JWT `exp`) — already enforced by verification
     /// itself; exposed so a replay-detection window built from `issued_at`
     /// can be sized consistently with it.
     pub expiration: SystemTime,
+}
+
+/// A decoded Apple identity token whose signature, `iss`, `aud` and `exp`
+/// idunn verified, and whose nonce *presence* it enforced per the configured
+/// `NoncePolicy`.
+#[derive(Clone, Debug)]
+pub struct VerifiedIdentityToken {
+    /// The token's `nonce` claim, verbatim — **not** compared against
+    /// anything. idunn cannot know the value you generated for this
+    /// authentication attempt; comparing this against it (however you
+    /// tracked it — a session record, a hashed or async lookup) is the one
+    /// verification step left to you, and skipping it leaves the flow open
+    /// to replay. `None` only when `NoncePolicy::Permissive` accepted a
+    /// token that carried no `nonce` (see `NoncePolicy`); in that case size
+    /// a replay-detection window from `identity.issued_at`/`expiration`.
+    pub nonce: Option<String>,
+    /// The verified identity claims.
+    pub identity: AppleIdentity,
 }
 
 /// The email-related claims of an Apple identity token, present only when the
@@ -79,8 +87,8 @@ pub enum NoncePolicy {
     Strict,
     /// Follow the `nonce_supported`-conditioned handling Apple's docs
     /// suggest: <https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token>
-    /// — a missing `nonce` is only tolerated (`AppleIdentity::nonce` is
-    /// `None`) when `nonce_supported` is `false` or absent; if
+    /// — a missing `nonce` is only tolerated (`VerifiedIdentityToken::nonce`
+    /// is `None`) when `nonce_supported` is `false` or absent; if
     /// `nonce_supported` is `true`, a missing nonce is still `InvalidToken`.
     Permissive,
 }
@@ -161,7 +169,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
         // 4 are configured into `validation` below. 2 is only partially done
         // here: `verify_identity_token` enforces nonce *presence* per the
         // configured `NoncePolicy` and returns the claim as-is on
-        // `AppleIdentity`, but never compares its *value* — that requires
+        // `VerifiedIdentityToken`, but never compares its *value* — that requires
         // knowing where/how the caller tracked the nonce it issued, which
         // idunn has no generic way to do, so that comparison stays the
         // caller's responsibility.
@@ -195,7 +203,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
     pub(crate) async fn verify_identity_token(
         &self,
         identity_token: &str,
-    ) -> Result<AppleIdentity, VerificationError> {
+    ) -> Result<VerifiedIdentityToken, VerificationError> {
         let decoded_header = jsonwebtoken::decode_header(identity_token)
             .map_err(InvalidTokenCause::Rejected)
             .map_err(VerificationError::InvalidToken)?;
@@ -248,13 +256,15 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
             Some(_) => None,
         };
 
-        Ok(AppleIdentity {
-            apple_user_id: decoded.claims.sub,
-            email,
-            real_user_status,
+        Ok(VerifiedIdentityToken {
             nonce: decoded.claims.nonce,
-            issued_at: UNIX_EPOCH + Duration::from_secs(decoded.claims.iat),
-            expiration: UNIX_EPOCH + Duration::from_secs(decoded.claims.exp),
+            identity: AppleIdentity {
+                apple_user_id: decoded.claims.sub,
+                email,
+                real_user_status,
+                issued_at: UNIX_EPOCH + Duration::from_secs(decoded.claims.iat),
+                expiration: UNIX_EPOCH + Duration::from_secs(decoded.claims.exp),
+            },
         })
     }
 }
@@ -409,15 +419,16 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let VerifiedIdentityToken { nonce, identity } =
+            client.verify_identity_token(&token).await.unwrap();
 
+        assert_eq!(nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(identity.apple_user_id, "apple-user-1");
         let email = identity.email.as_ref().unwrap();
         assert_eq!(email.address, "user@example.com");
         assert!(!email.verified);
         assert!(!email.is_private);
         assert_eq!(identity.real_user_status, None);
-        assert_eq!(identity.nonce.as_deref(), Some("expected-nonce"));
         assert_eq!(
             identity.issued_at,
             UNIX_EPOCH + Duration::from_secs(claims.iat)
@@ -435,7 +446,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(identity.email.is_none());
     }
@@ -447,7 +458,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(identity.email.unwrap().verified);
     }
@@ -459,7 +470,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(identity.email.unwrap().verified);
     }
@@ -471,7 +482,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(!identity.email.unwrap().verified);
     }
@@ -482,7 +493,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(!identity.email.unwrap().verified);
     }
@@ -528,7 +539,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(identity.email.unwrap().is_private);
     }
@@ -539,7 +550,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(!identity.email.unwrap().is_private);
     }
@@ -552,7 +563,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(!identity.email.unwrap().is_private);
     }
@@ -564,7 +575,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert!(identity.email.unwrap().is_private);
     }
@@ -575,7 +586,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert_eq!(identity.real_user_status, None);
     }
@@ -592,7 +603,7 @@ mod tests {
             let token = sign_token(rs256_header(), &claims);
             let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-            let identity = client.verify_identity_token(&token).await.unwrap();
+            let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
             assert_eq!(identity.real_user_status, Some(expected));
         }
@@ -605,7 +616,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let identity = client.verify_identity_token(&token).await.unwrap().identity;
 
         assert_eq!(identity.real_user_status, None);
     }
@@ -713,9 +724,10 @@ mod tests {
             },
         );
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let VerifiedIdentityToken { nonce, .. } =
+            client.verify_identity_token(&token).await.unwrap();
 
-        assert_eq!(identity.nonce, None);
+        assert_eq!(nonce, None);
     }
 
     #[tokio::test]
@@ -730,9 +742,10 @@ mod tests {
             },
         );
 
-        let identity = client.verify_identity_token(&token).await.unwrap();
+        let VerifiedIdentityToken { nonce, .. } =
+            client.verify_identity_token(&token).await.unwrap();
 
-        assert_eq!(identity.nonce, None);
+        assert_eq!(nonce, None);
     }
 
     #[tokio::test]
