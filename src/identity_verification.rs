@@ -1,5 +1,6 @@
+use crate::config::{NoncePolicy, VerificationConfig};
 use crate::error::{InvalidTokenCause, VerificationError};
-use crate::jwks_store::{JwksStore, JwksStoreConfig};
+use crate::jwks_store::JwksStore;
 use crate::transport::HttpGet;
 use jsonwebtoken::Validation;
 use serde::Deserialize;
@@ -74,31 +75,6 @@ pub enum RealUserStatus {
     LikelyReal,
 }
 
-/// Controls how `verify_identity_token` handles a token with no `nonce`
-/// claim.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum NoncePolicy {
-    /// A missing `nonce` claim is always `InvalidToken`, regardless of the
-    /// token's `nonce_supported` claim. Stricter than Apple's own suggested
-    /// handling (see `Permissive`), chosen as the default so replay
-    /// protection is never silently disabled by a claim idunn can't verify
-    /// the integrity of.
-    #[default]
-    Strict,
-    /// Follow the `nonce_supported`-conditioned handling Apple's docs
-    /// suggest: <https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token>
-    /// — a missing `nonce` is only tolerated (`VerifiedIdentityToken::nonce`
-    /// is `None`) when `nonce_supported` is `false` or absent; if
-    /// `nonce_supported` is `true`, a missing nonce is still `InvalidToken`.
-    Permissive,
-}
-
-/// Configuration for `IdentityVerificationClient`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct IdentityVerificationConfig {
-    pub nonce_policy: NoncePolicy,
-}
-
 #[derive(Deserialize)]
 struct ApplePayload {
     sub: String,
@@ -144,16 +120,11 @@ where
 pub(crate) struct IdentityVerificationClient<T: HttpGet> {
     jwks_store: JwksStore<T>,
     validation: Validation,
-    config: IdentityVerificationConfig,
+    config: VerificationConfig,
 }
 
 impl<T: HttpGet> IdentityVerificationClient<T> {
-    pub(crate) fn new(
-        client_id: &str,
-        transport: T,
-        jwks_config: JwksStoreConfig,
-        config: IdentityVerificationConfig,
-    ) -> Self {
+    pub(crate) fn new(client_id: &str, config: VerificationConfig, transport: T) -> Self {
         // https://developer.apple.com/documentation/signinwithapple/verifying-a-user
         //
         // steps needed to validate the identity token:
@@ -190,7 +161,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
         validation.set_required_spec_claims(&["iss", "aud", "exp"]);
 
         Self {
-            jwks_store: JwksStore::new(transport, jwks_config),
+            jwks_store: JwksStore::new(config, transport),
             validation,
             config,
         }
@@ -398,19 +369,14 @@ mod tests {
     }
 
     fn client(transport: MockHttpGet) -> IdentityVerificationClient<MockHttpGet> {
-        client_with_config(transport, IdentityVerificationConfig::default())
+        client_with_config(transport, VerificationConfig::default())
     }
 
     fn client_with_config(
         transport: MockHttpGet,
-        config: IdentityVerificationConfig,
+        config: VerificationConfig,
     ) -> IdentityVerificationClient<MockHttpGet> {
-        IdentityVerificationClient::new(
-            TEST_BUNDLE_ID,
-            transport,
-            JwksStoreConfig::default(),
-            config,
-        )
+        IdentityVerificationClient::new(TEST_BUNDLE_ID, config, transport)
     }
 
     #[tokio::test]
@@ -676,8 +642,9 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            IdentityVerificationConfig {
+            VerificationConfig {
                 nonce_policy: NoncePolicy::Strict,
+                ..VerificationConfig::default()
             },
         );
 
@@ -698,8 +665,9 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            IdentityVerificationConfig {
+            VerificationConfig {
                 nonce_policy: NoncePolicy::Strict,
+                ..VerificationConfig::default()
             },
         );
 
@@ -719,8 +687,9 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            IdentityVerificationConfig {
+            VerificationConfig {
                 nonce_policy: NoncePolicy::Permissive,
+                ..VerificationConfig::default()
             },
         );
 
@@ -737,8 +706,9 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            IdentityVerificationConfig {
+            VerificationConfig {
                 nonce_policy: NoncePolicy::Permissive,
+                ..VerificationConfig::default()
             },
         );
 
@@ -755,8 +725,9 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client_with_config(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            IdentityVerificationConfig {
+            VerificationConfig {
                 nonce_policy: NoncePolicy::Permissive,
+                ..VerificationConfig::default()
             },
         );
 

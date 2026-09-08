@@ -3,21 +3,19 @@
 // https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
 // https://developer.apple.com/support/offering-account-deletion-in-your-app/
 
+mod config;
 mod error;
 mod identity_verification;
 mod jwks_store;
 mod token_exchange;
 mod transport;
 
+pub use config::{NoncePolicy, VerificationConfig};
 pub use error::{
     AppleErrorCode, ClientSecretError, InvalidPrivateKeyError, InvalidTokenCause, SignInError,
     TokenExchangeError, TokenRevocationError, VerificationError,
 };
-pub use identity_verification::{
-    AppleEmail, AppleIdentity, IdentityVerificationConfig, NoncePolicy, RealUserStatus,
-    VerifiedIdentityToken,
-};
-pub use jwks_store::JwksStoreConfig;
+pub use identity_verification::{AppleEmail, AppleIdentity, RealUserStatus, VerifiedIdentityToken};
 pub use token_exchange::{AppleTokenConfig, RefreshToken};
 pub use transport::{HttpGet, HttpPost, HttpTransport, TransportError};
 
@@ -92,29 +90,25 @@ impl AppleAuthClient<transport::ReqwestTransport> {
     pub fn new(token_config: AppleTokenConfig) -> Result<Self, InvalidPrivateKeyError> {
         Self::with_transport(
             token_config,
+            VerificationConfig::default(),
             transport::ReqwestTransport::default(),
-            JwksStoreConfig::default(),
-            IdentityVerificationConfig::default(),
         )
     }
 }
 
-// TODO: think about the order of constructor arguments
 impl<T: HttpTransport> AppleAuthClient<T> {
     pub fn with_transport(
         token_config: AppleTokenConfig,
+        config: VerificationConfig,
         transport: T,
-        jwks_config: JwksStoreConfig,
-        identity_verification_config: IdentityVerificationConfig,
     ) -> Result<Self, InvalidPrivateKeyError> {
         let signing_key = EncodingKey::from_ec_pem(&token_config.private_key_pem)
             .map_err(InvalidPrivateKeyError::from)?;
         let identity_verification =
             Arc::new(identity_verification::IdentityVerificationClient::new(
                 &token_config.client_id,
+                config,
                 transport.clone(),
-                jwks_config,
-                identity_verification_config,
             ));
         Ok(Self {
             identity_verification,
@@ -299,9 +293,8 @@ mod tests {
         let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
         let client = AppleAuthClient::with_transport(
             test_token_config(),
+            VerificationConfig::default(),
             transport.clone(),
-            JwksStoreConfig::default(),
-            IdentityVerificationConfig::default(),
         )
         .expect("valid test key should construct client");
 
@@ -378,9 +371,8 @@ mod tests {
         let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
         let client = AppleAuthClient::with_transport(
             config,
+            VerificationConfig::default(),
             transport,
-            JwksStoreConfig::default(),
-            IdentityVerificationConfig::default(),
         )
         .expect("valid test key should construct client");
 
@@ -410,9 +402,8 @@ mod tests {
         let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
         let client = AppleAuthClient::with_transport(
             config,
+            VerificationConfig::default(),
             transport,
-            JwksStoreConfig::default(),
-            IdentityVerificationConfig::default(),
         )
         .expect("valid test key should construct client");
 
@@ -438,9 +429,8 @@ mod tests {
         );
         let client = AppleAuthClient::with_transport(
             config,
+            VerificationConfig::default(),
             transport.clone(),
-            JwksStoreConfig::default(),
-            IdentityVerificationConfig::default(),
         )
         .expect("valid test key should construct client");
 
@@ -480,9 +470,8 @@ mod tests {
         );
         let client = AppleAuthClient::with_transport(
             test_token_config(),
+            VerificationConfig::default(),
             transport,
-            JwksStoreConfig::default(),
-            IdentityVerificationConfig::default(),
         )
         .expect("valid test key should construct client");
 
@@ -505,9 +494,8 @@ mod tests {
         let transport = FakeAppleTransport::new("", "");
         let client = AppleAuthClient::with_transport(
             test_token_config(),
+            VerificationConfig::default(),
             transport.clone(),
-            JwksStoreConfig::default(),
-            IdentityVerificationConfig::default(),
         )
         .expect("valid test key should construct client");
 

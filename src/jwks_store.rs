@@ -6,68 +6,12 @@ use arc_swap::ArcSwapOption;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::jwk::JwkSet;
 
+use crate::config::VerificationConfig;
 use crate::error::{InvalidTokenCause, VerificationError};
 use crate::transport::{HttpGet, TransportError};
 
 const JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
-// TODO: make this configurable through the public API instead of hardcoding it here
-// (same TODO exists in token_exchange.rs's REQUEST_TIMEOUT).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Clone, Debug)]
-pub struct JwksStoreConfig {
-    /// How long a successful fetch stays "fresh" before `get_key`'s lazy path
-    /// tries again, even if every requested kid is still present — protects
-    /// against holding a key Apple has since revoked. Not a hard expiry: a
-    /// key already cached is still honored past this interval, right up
-    /// until a fetch attempt actually replaces the snapshot.
-    pub refresh_interval: Duration,
-    /// Floor on how often `JwksStore` will actually contact Apple's key
-    /// endpoint, regardless of why a refresh was requested: backing off
-    /// after a failed attempt, an explicit `refresh_keystore()` call arriving
-    /// sooner than expected, or a flood of `get_key` lookups for unknown
-    /// kids. Not tied specifically to failure — it rate-limits every attempt.
-    /// Important protectionagainst DoS attacks.
-    pub cooldown_period: Duration,
-    /// Extra window past `refresh_interval` during which `get_key` keeps
-    /// serving a kid it already holds *without* first attempting a refresh.
-    /// `refresh_interval` only makes the lazy refresh eligible; this is how
-    /// long past that point a cached-kid lookup still short-circuits instead
-    /// of blocking on `try_refresh` (which holds `network_request_mutex` for
-    /// the whole fetch, up to `REQUEST_TIMEOUT`). So a brief refresh outage —
-    /// Apple's endpoint down, or cooldown backoff after a failure — can't add
-    /// fetch latency to logins whose key is already cached. Set to
-    /// `Duration::ZERO` to refresh eagerly. Lookups for a kid
-    /// that *isn't* in the snapshot ignore this and refresh immediately.
-    pub stale_key_grace_period: Duration,
-    /// Hard upper bound on how old the cached snapshot may be and still be
-    /// trusted at all. Unlike `refresh_interval` and `stale_key_grace_period`
-    /// — which only tune how *eagerly* a refresh is attempted and never stop
-    /// a key we already hold from being honored — this one fails closed: once
-    /// the last successful fetch is older than `max_key_age`, `get_key`
-    /// refuses every kid (even one still present in the snapshot) with
-    /// `CannotVerifyToken` and logs at `error` level.
-    ///
-    /// This caps the blast radius of a prolonged refresh outage (Apple's
-    /// endpoint unreachable for days, or the host's egress broken): without
-    /// it, a snapshot fetched long ago would keep validating tokens forever,
-    /// including tokens signed with a key Apple has since revoked. Should be
-    /// set comfortably larger than `refresh_interval + stale_key_grace_period`
-    /// so it only ever bites when refresh has genuinely been failing for a
-    /// long time.
-    pub max_key_age: Duration,
-}
-
-impl Default for JwksStoreConfig {
-    fn default() -> Self {
-        Self {
-            refresh_interval: Duration::from_secs(6 * 60 * 60),
-            cooldown_period: Duration::from_secs(60),
-            stale_key_grace_period: Duration::from_secs(10 * 60),
-            max_key_age: Duration::from_secs(72 * 60 * 60),
-        }
-    }
-}
 
 struct CachedKeys {
     keys: HashMap<String, DecodingKey>,
@@ -95,11 +39,11 @@ pub(crate) struct JwksStore<T: HttpGet> {
     // failure) happened, so the backoff/rate-limit floor has no separate
     // state to keep in sync with the lock.
     network_request_mutex: async_lock::Mutex<Option<Instant>>,
-    config: JwksStoreConfig,
+    config: VerificationConfig,
 }
 
 impl<T: HttpGet> JwksStore<T> {
-    pub fn new(transport: T, config: JwksStoreConfig) -> Self {
+    pub fn new(config: VerificationConfig, transport: T) -> Self {
         Self {
             key_set: ArcSwapOption::empty(),
             transport,
@@ -300,33 +244,36 @@ mod tests {
     /// hard-expiry path stays out of the way unless a test opts into it.
     const LONG_MAX_KEY_AGE: Duration = Duration::from_secs(3600);
 
-    fn fast_config() -> JwksStoreConfig {
-        JwksStoreConfig {
+    fn fast_config() -> VerificationConfig {
+        VerificationConfig {
             refresh_interval: Duration::from_secs(6 * 60 * 60),
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::ZERO,
             max_key_age: LONG_MAX_KEY_AGE,
+            ..VerificationConfig::default()
         }
     }
 
-    fn very_fast_config() -> JwksStoreConfig {
-        JwksStoreConfig {
+    fn very_fast_config() -> VerificationConfig {
+        VerificationConfig {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::ZERO,
             max_key_age: LONG_MAX_KEY_AGE,
+            ..VerificationConfig::default()
         }
     }
 
     /// Refresh interval elapses quickly, but the cooldown floor stays long —
     /// isolates the cooldown-floor skip from the refresh-interval skip, since
     /// both would otherwise fire together.
-    fn short_refresh_long_cooldown_config() -> JwksStoreConfig {
-        JwksStoreConfig {
+    fn short_refresh_long_cooldown_config() -> VerificationConfig {
+        VerificationConfig {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_secs(60),
             stale_key_grace_period: Duration::ZERO,
             max_key_age: LONG_MAX_KEY_AGE,
+            ..VerificationConfig::default()
         }
     }
 
@@ -334,19 +281,20 @@ mod tests {
     /// stays comfortably longer than the sleeps below — so a kid we already
     /// hold keeps being served straight from the snapshot after it goes
     /// stale, without any fetch.
-    fn short_refresh_long_grace_config() -> JwksStoreConfig {
-        JwksStoreConfig {
+    fn short_refresh_long_grace_config() -> VerificationConfig {
+        VerificationConfig {
             refresh_interval: Duration::from_millis(20),
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::from_secs(60),
             max_key_age: LONG_MAX_KEY_AGE,
+            ..VerificationConfig::default()
         }
     }
 
     #[tokio::test]
     async fn fetches_and_caches_key_on_cold_cache() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         let key = store.get_key("kid-1").await.unwrap();
 
@@ -357,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn second_lookup_for_cached_kid_does_not_refetch() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         store.get_key("kid-1").await.unwrap();
         store.get_key("kid-1").await.unwrap();
@@ -368,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_misses_share_a_single_fetch() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         let (first, second) = tokio::join!(store.get_key("kid-1"), store.get_key("kid-1"));
 
@@ -383,7 +331,7 @@ mod tests {
             status: 500,
             body: "boom".to_string(),
         });
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         let result = store.get_key("kid-1").await;
 
@@ -397,7 +345,7 @@ mod tests {
             status: 500,
             body: "boom".to_string(),
         });
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         store.get_key("kid-1").await.unwrap_err();
         store.get_key("kid-1").await.unwrap_err();
@@ -414,7 +362,7 @@ mod tests {
             }),
             Ok(jwks_body("kid-1")),
         ]);
-        let store = JwksStore::new(transport.clone(), fast_config());
+        let store = JwksStore::new(fast_config(), transport.clone());
 
         store.get_key("kid-1").await.unwrap_err();
         assert_eq!(transport.call_count(), 1);
@@ -429,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn refetches_a_cached_kid_once_refresh_interval_elapses() {
         let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
-        let store = JwksStore::new(transport.clone(), very_fast_config());
+        let store = JwksStore::new(very_fast_config(), transport.clone());
 
         store.get_key("kid-1").await.unwrap();
         assert_eq!(transport.call_count(), 1);
@@ -452,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn cached_kid_within_grace_period_is_served_without_refresh() {
         let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
-        let store = JwksStore::new(transport.clone(), short_refresh_long_grace_config());
+        let store = JwksStore::new(short_refresh_long_grace_config(), transport.clone());
 
         store.get_key("kid-1").await.unwrap();
         assert_eq!(transport.call_count(), 1);
@@ -471,13 +419,14 @@ mod tests {
     async fn cached_kid_past_grace_period_triggers_refresh() {
         let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
         let store = JwksStore::new(
-            transport.clone(),
-            JwksStoreConfig {
+            VerificationConfig {
                 refresh_interval: Duration::from_millis(10),
                 cooldown_period: Duration::from_millis(10),
                 stale_key_grace_period: Duration::from_millis(20),
                 max_key_age: LONG_MAX_KEY_AGE,
+                ..VerificationConfig::default()
             },
+            transport.clone(),
         );
 
         store.get_key("kid-1").await.unwrap();
@@ -502,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_kid_within_grace_period_still_refreshes_immediately() {
         let transport = MockHttpGet::sequence(vec![Ok(jwks_body("kid-1")), Ok(jwks_body("kid-2"))]);
-        let store = JwksStore::new(transport.clone(), short_refresh_long_grace_config());
+        let store = JwksStore::new(short_refresh_long_grace_config(), transport.clone());
 
         store.get_key("kid-1").await.unwrap();
         assert_eq!(transport.call_count(), 1);
@@ -518,22 +467,22 @@ mod tests {
     #[tokio::test]
     async fn refresh_keystore_warms_a_cold_store() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         let suggested_wait = store.refresh_keystore().await;
 
-        assert_eq!(suggested_wait, JwksStoreConfig::default().refresh_interval);
+        assert_eq!(suggested_wait, VerificationConfig::default().refresh_interval);
         assert_eq!(transport.call_count(), 1);
     }
 
     #[tokio::test]
     async fn second_immediate_refresh_keystore_call_is_skipped_without_touching_try_refresh() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         assert_eq!(
             store.refresh_keystore().await,
-            JwksStoreConfig::default().refresh_interval
+            VerificationConfig::default().refresh_interval
         );
         assert_eq!(transport.call_count(), 1);
 
@@ -542,7 +491,7 @@ mod tests {
         // never even get to the cooldown check) and instead report roughly
         // how long is left until refresh_interval elapses.
         let second_wait = store.refresh_keystore().await;
-        let refresh_interval = JwksStoreConfig::default().refresh_interval;
+        let refresh_interval = VerificationConfig::default().refresh_interval;
         assert!(second_wait <= refresh_interval);
         assert!(second_wait > refresh_interval - Duration::from_secs(1));
         assert_eq!(transport.call_count(), 1);
@@ -551,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_keystore_call_after_refresh_interval_elapses_is_skipped_by_cooldown_floor() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
-        let store = JwksStore::new(transport.clone(), short_refresh_long_cooldown_config());
+        let store = JwksStore::new(short_refresh_long_cooldown_config(), transport.clone());
 
         assert_eq!(store.refresh_keystore().await, Duration::from_millis(20));
         assert_eq!(transport.call_count(), 1);
@@ -568,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_kid_after_fresh_fetch_is_invalid_token() {
         let transport = MockHttpGet::returning(jwks_body("kid-1"));
-        let store = JwksStore::new(transport, JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport);
 
         let result = store.get_key("does-not-exist").await;
 
@@ -588,7 +537,7 @@ mod tests {
                 body: "boom".to_string(),
             }),
         ]);
-        let store = JwksStore::new(transport.clone(), very_fast_config());
+        let store = JwksStore::new(very_fast_config(), transport.clone());
 
         let key = store.get_key("kid-1").await.unwrap();
         assert_eq!(transport.call_count(), 1);
@@ -613,13 +562,14 @@ mod tests {
             }),
         ]);
         let store = JwksStore::new(
-            transport.clone(),
-            JwksStoreConfig {
+            VerificationConfig {
                 refresh_interval: Duration::from_millis(10),
                 cooldown_period: Duration::from_millis(10),
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_millis(30),
+                ..VerificationConfig::default()
             },
+            transport.clone(),
         );
 
         store.get_key("kid-1").await.unwrap();
@@ -646,13 +596,14 @@ mod tests {
             Ok(jwks_body("kid-1")),
         ]);
         let store = JwksStore::new(
-            transport.clone(),
-            JwksStoreConfig {
+            VerificationConfig {
                 refresh_interval: Duration::from_millis(10),
                 cooldown_period: Duration::from_millis(10),
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_millis(30),
+                ..VerificationConfig::default()
             },
+            transport.clone(),
         );
 
         store.get_key("kid-1").await.unwrap();
@@ -678,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_json_does_not_surface_to_caller() {
         let transport = MockHttpGet::returning("not json".to_string());
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         let result = store.get_key("kid-1").await;
 
@@ -689,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn network_error_does_not_surface_to_caller() {
         let transport = MockHttpGet::failing_with(network_error());
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         let result = store.get_key("kid-1").await;
 
@@ -706,7 +657,7 @@ mod tests {
                 body: "boom".to_string(),
             }),
         ]);
-        let store = JwksStore::new(transport.clone(), very_fast_config());
+        let store = JwksStore::new(very_fast_config(), transport.clone());
 
         store.get_key("kid-1").await.unwrap();
         assert_eq!(transport.call_count(), 1);
@@ -728,7 +679,7 @@ mod tests {
             status: 500,
             body: "boom".to_string(),
         });
-        let store = JwksStore::new(transport.clone(), JwksStoreConfig::default());
+        let store = JwksStore::new(VerificationConfig::default(), transport.clone());
 
         let (first, second) = tokio::join!(store.get_key("kid-1"), store.get_key("kid-1"));
 

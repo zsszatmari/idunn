@@ -53,7 +53,9 @@ This abstraction covers every network call idunn makes, including the JWKS fetch
 
 `post_form`/`get` return a dedicated `TransportError` (network failure, or HTTP status + raw body) rather than an idunn Apple-domain error: the transport is a generic HTTP abstraction and shouldn't need to know about idunn's Apple-specific error variants. The Apple-aware callers convert a `TransportError` into the operation-specific error type — `JwksStore`'s fetch into `VerificationError::CannotVerifyToken`, `exchange_authorization_code` into `TokenExchangeError`, `revoke_refresh_token` into `TokenRevocationError` — parsing Apple's error body along the way. `TransportError::Network` itself carries a boxed `dyn Error` rather than concretely `reqwest::Error`, so a non-reqwest `HttpTransport` implementation can report its own underlying error type instead of being forced to produce one it doesn't have.
 
-`HttpTransport`, `HttpGet`, `HttpPost`, `TransportError` and `JwksStoreConfig` are all re-exported from `lib.rs`. They have to be: `AppleAuthClient<T: HttpTransport>` is generic over its transport, so a downstream crate that stores one in a struct field must name a concrete `T` (`impl Trait` is not allowed there, and the RPITIT traits are not dyn-compatible), and `with_transport` takes a `JwksStoreConfig`. Left as private imports they made the whole injectable-transport abstraction unreachable from outside the crate — `with_transport` was public but uncallable.
+`HttpTransport`, `HttpGet`, `HttpPost`, `TransportError`, `VerificationConfig` and `NoncePolicy` are all re-exported from `lib.rs`. They have to be: `AppleAuthClient<T: HttpTransport>` is generic over its transport, so a downstream crate that stores one in a struct field must name a concrete `T` (`impl Trait` is not allowed there, and the RPITIT traits are not dyn-compatible), and `with_transport` takes a `VerificationConfig`. Left as private imports they made the whole injectable-transport abstraction unreachable from outside the crate — `with_transport` was public but uncallable.
+
+`with_transport` takes one `VerificationConfig`, not the two structs (`JwksStoreConfig` + a one-field `IdentityVerificationConfig`) it used to: both configured a single operation — identity-token verification — and the JWKS cache exists only to serve it, so splitting them made a caller pass two arguments to express one decision. `transport` is the last parameter because it is the one callers most often leave at a default-constructed value (`ReqwestTransport::default()`), while the config is what they actually tune. The type lives in its own `config` module because both `jwks_store` and `identity_verification` need it and neither should depend on the other; `JwksStore` stores the whole `VerificationConfig` and simply ignores `nonce_policy`, rather than duplicating the four cache fields into a private inner struct.
 
 ## Why `verify_identity_token` doesn't check the nonce itself
 
@@ -63,7 +65,7 @@ Where the claim is returned is itself a deliberate choice. The nonce is **not** 
 
 Rejected alternative: an `expected_nonce: &str` parameter on `verify_identity_token` that does a constant-time compare internally. It reads cleaner, but it hard-codes one strategy — synchronous plaintext equality against a value the caller already has in hand — and forecloses every other way a caller might have stored the nonce it issued (a hashed or async lookup, an HMAC, a session record keyed differently). Making the obligation structurally prominent without dictating how it is met keeps all of those open.
 
-idunn does, however, enforce nonce *presence*, controlled by `NoncePolicy` (part of `IdentityVerificationConfig`):
+idunn does, however, enforce nonce *presence*, controlled by `NoncePolicy` (part of `VerificationConfig`):
 
 - `NoncePolicy::Strict` (the default): a token with no `nonce` claim is always `InvalidToken`, regardless of the token's `nonce_supported` claim. This is stricter than what Apple's docs technically require, chosen so replay protection is never silently disabled by a claim idunn has no way to verify the integrity of.
 - `NoncePolicy::Permissive`: follows the handling Apple's own docs suggest (https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token, `nonce_supported`) — a missing nonce is tolerated (`nonce` is `None`) only when `nonce_supported` is `false` or absent; a `nonce_supported: true` claim still fails the token even under this policy, since Apple's guidance is to treat the nonce as mandatory in that case.
@@ -105,12 +107,13 @@ source claims being optional on the wire:
   the absent case as equivalent to a `false` value (Sign in with Apple at Work & School), so there is
   no distinct "unknown" state worth preserving — `Option<bool>` would just push a meaningless
   three-way match onto every caller.
-- `is_private` defaults to checking whether the address ends with `@privaterelay.appleid.com` when
-  `is_private_email` is absent. Apple's private relay domain is a known, stable string, so this
-  fallback gives callers a real answer instead of `None` in the case — token issuers other than
-  current Apple SDKs, or historical tokens — where the claim wasn't sent. The claim, when present,
-  always wins over the heuristic in both directions: an explicit `false` on a relay-looking address
-  is trusted over the domain guess, and vice versa. The heuristic only fires on absence.
+- `is_private` defaults to checking whether the address ends with `@privaterelay.appleid.com` or
+  (as per Apple's newly publicly domain) `@private.icloud.com` when `is_private_email` is absent. 
+  Apple's private relay domains are known, stable strings, so this   fallback gives callers a real 
+  answer instead of `None` in the case — token issuers other than   current Apple SDKs, or historical
+  tokens — where the claim wasn't sent. The claim, when present,   always wins over the heuristic in 
+  both directions: an explicit `false` on a relay-looking address  is trusted over the domain guess, 
+  and vice versa. The heuristic only fires on absence.
 
 `email_verified`/`is_private_email` also arrive as either a JSON Boolean or the strings `"true"` /
 `"false"` — Apple's docs state this explicitly. Both forms are parsed inside a `serde`
