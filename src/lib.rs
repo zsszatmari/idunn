@@ -15,7 +15,7 @@ pub use error::{
     AppleErrorCode, ClientSecretError, InvalidPrivateKeyError, InvalidTokenCause, SignInError,
     TokenExchangeError, TokenRevocationError, VerificationError,
 };
-pub use identity_verification::{AppleEmail, AppleIdentity, RealUserStatus, VerifiedIdentityToken};
+pub use identity_verification::{AppleEmail, AppleIdentity, RealUserStatus, IdentityWithPendingNonce};
 pub use token_exchange::{AppleTokenConfig, RefreshToken};
 pub use transport::{HttpGet, HttpPost, HttpTransport, TransportError};
 
@@ -43,7 +43,7 @@ pub struct SignInDetails {
     /// The `id_token`'s `nonce` claim, verbatim — **not** compared against
     /// anything. Comparing it against the value you generated for this
     /// authentication attempt is the one verification step left to you; see
-    /// [`VerifiedIdentityToken::nonce`] for why idunn cannot do it and what
+    /// [`IdentityWithPendingNonce::nonce`] for why idunn cannot do it and what
     /// `None` means.
     pub nonce: Option<String>,
     /// Apple's refresh token. Store it: revoking it is how an app satisfies
@@ -131,11 +131,11 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     /// published JWKS), `iss`, `aud` and `exp` are all checked, and its nonce
     /// *presence* is enforced per the configured `NoncePolicy`. The nonce
     /// *value* is **not** compared against anything — that step is left to the
-    /// caller; see [`VerifiedIdentityToken::nonce`].
+    /// caller; see [`IdentityWithPendingNonce::nonce`].
     pub async fn verify_identity_token(
         &self,
         identity_token: &str,
-    ) -> Result<VerifiedIdentityToken, VerificationError> {
+    ) -> Result<IdentityWithPendingNonce, VerificationError> {
         self.identity_verification
             .verify_identity_token(identity_token)
             .await
@@ -166,7 +166,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         )
         .await?;
         match self.verify_identity_token(&tokens.id_token).await {
-            Ok(VerifiedIdentityToken { nonce, identity }) => Ok(SignInDetails {
+            Ok(IdentityWithPendingNonce { nonce, identity }) => Ok(SignInDetails {
                 nonce,
                 refresh_token: tokens.refresh_token,
                 identity,
@@ -376,7 +376,7 @@ mod tests {
         )
         .expect("valid test key should construct client");
 
-        let VerifiedIdentityToken { nonce, identity } =
+        let IdentityWithPendingNonce { nonce, identity } =
             client.verify_identity_token(&token).await.unwrap();
 
         assert_eq!(nonce.as_deref(), Some("expected-nonce"));

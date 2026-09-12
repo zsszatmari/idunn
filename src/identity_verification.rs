@@ -32,7 +32,7 @@ pub struct AppleIdentity {
 /// idunn verified, and whose nonce *presence* it enforced per the configured
 /// `NoncePolicy`.
 #[derive(Clone, Debug)]
-pub struct VerifiedIdentityToken {
+pub struct IdentityWithPendingNonce {
     /// The token's `nonce` claim, verbatim — **not** compared against
     /// anything. idunn cannot know the value you generated for this
     /// authentication attempt; comparing this against it (however you
@@ -140,7 +140,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
         // 4 are configured into `validation` below. 2 is only partially done
         // here: `verify_identity_token` enforces nonce *presence* per the
         // configured `NoncePolicy` and returns the claim as-is on
-        // `VerifiedIdentityToken`, but never compares its *value* — that requires
+        // `IdentityWithPendingNonce`, but never compares its *value* — that requires
         // knowing where/how the caller tracked the nonce it issued, which
         // idunn has no generic way to do, so that comparison stays the
         // caller's responsibility.
@@ -174,7 +174,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
     pub(crate) async fn verify_identity_token(
         &self,
         identity_token: &str,
-    ) -> Result<VerifiedIdentityToken, VerificationError> {
+    ) -> Result<IdentityWithPendingNonce, VerificationError> {
         let decoded_header = jsonwebtoken::decode_header(identity_token)
             .map_err(InvalidTokenCause::Rejected)
             .map_err(VerificationError::InvalidToken)?;
@@ -227,7 +227,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
             Some(_) => None,
         };
 
-        Ok(VerifiedIdentityToken {
+        Ok(IdentityWithPendingNonce {
             nonce: decoded.claims.nonce,
             identity: AppleIdentity {
                 apple_user_id: decoded.claims.sub,
@@ -385,7 +385,7 @@ mod tests {
         let token = sign_token(rs256_header(), &claims);
         let client = client(MockHttpGet::returning(jwks_body_including(TEST_KID)));
 
-        let VerifiedIdentityToken { nonce, identity } =
+        let IdentityWithPendingNonce { nonce, identity } =
             client.verify_identity_token(&token).await.unwrap();
 
         assert_eq!(nonce.as_deref(), Some("expected-nonce"));
@@ -693,7 +693,7 @@ mod tests {
             },
         );
 
-        let VerifiedIdentityToken { nonce, .. } =
+        let IdentityWithPendingNonce { nonce, .. } =
             client.verify_identity_token(&token).await.unwrap();
 
         assert_eq!(nonce, None);
@@ -712,7 +712,7 @@ mod tests {
             },
         );
 
-        let VerifiedIdentityToken { nonce, .. } =
+        let IdentityWithPendingNonce { nonce, .. } =
             client.verify_identity_token(&token).await.unwrap();
 
         assert_eq!(nonce, None);

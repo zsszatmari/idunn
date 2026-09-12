@@ -68,8 +68,9 @@ pub enum AppleErrorCode {
     #[error("invalid_scope: the requested scope is invalid")]
     InvalidScope,
     /// The response body didn't parse as `ErrorResponse`, or its `error` value
-    /// isn't one of Apple's documented codes. Carries the raw response body.
-    #[error("unrecognized Apple error response: {0}")]
+    /// isn't one of Apple's documented codes. Carries the raw response body, but does not log it
+    /// to avoid leaking sensitive info
+    #[error("unrecognized Apple error response.")]
     UnknownError(String),
 }
 
@@ -143,7 +144,6 @@ pub enum TokenRevocationError {
 }
 
 /// Error from `AppleAuthClient::exchange_authorization_code`.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum SignInError {
     #[error(transparent)]
@@ -153,7 +153,7 @@ pub enum SignInError {
     ///
     /// Carries `refresh_token` because the code has already been consumed and
     /// the token is live at Apple: the caller must revoke it with
-    /// `AppleAuthClient::revoke_refresh_token`, retrying later on failure until
+    /// `AppleAuthClient::revoke_refresh_token`, ideally retrying later on failure until
     /// the revocation succeeds. Dropping this error without doing so leaves a
     /// live token that can't revoked in a nice way.
     #[error("authorization code exchanged, but its identity token failed verification")]

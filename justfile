@@ -21,7 +21,7 @@ clippy:
 check-all: check-powerset test-features test-minimal-versions
 
 # Local HTML coverage report, opened in the browser.
-coverage:
+coverage: cargo-deny cooldown
     @rustup run nightly true 2>/dev/null \
       || { echo "error: nightly toolchain missing (needed for coverage(off)); install with 'rustup toolchain install nightly --component llvm-tools'"; exit 1; }
     cargo +nightly llvm-cov --branch --html
@@ -37,5 +37,8 @@ coverage-ci min="90":
 cargo-deny:
     cargo deny check
 
+cooldown:
+    cargo cooldown
+
+
 # TODO: look into cargo-mutants
-# TODO: look into cackle

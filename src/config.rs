@@ -13,7 +13,7 @@ pub enum NoncePolicy {
     Strict,
     /// Follow the `nonce_supported`-conditioned handling Apple's docs
     /// suggest: <https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token>
-    /// — a missing `nonce` is only tolerated (`VerifiedIdentityToken::nonce`
+    /// — a missing `nonce` is only tolerated (`IdentityWithPendingNonce::nonce`
     /// is `None`) when `nonce_supported` is `false` or absent; if
     /// `nonce_supported` is `true`, a missing nonce is still `InvalidToken`.
     Permissive,
