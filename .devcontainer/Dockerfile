@@ -167,8 +167,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       cargo-hack \
       cargo-minimal-versions \
       cargo-deny \
- && find /usr/local/cargo/bin ! -perm -o+w -exec chmod a+w {} + \
+      cargo-cooldown \
+    && find /usr/local/cargo/bin ! -perm -o+w -exec chmod a+w {} + \
  && find /usr/local/cargo -maxdepth 1 -type f ! -perm -o+w -exec chmod a+w {} +
 
 USER $USERNAME
-

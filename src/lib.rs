@@ -12,10 +12,11 @@ mod transport;
 
 pub use config::{NoncePolicy, VerificationConfig};
 pub use error::{
-    AppleErrorCode, ClientSecretError, InvalidPrivateKeyError, InvalidTokenCause, SignInError,
-    TokenExchangeError, TokenRevocationError, VerificationError,
+    AppleErrorCode, ClientSecretError, CodeExchangeError, InvalidPrivateKeyError,
+    InvalidTokenCause, PostExchangeRejection, SignInError, TokenExchangeError,
+    TokenRevocationError, VerificationError,
 };
-pub use identity_verification::{AppleEmail, AppleIdentity, RealUserStatus, IdentityWithPendingNonce};
+pub use identity_verification::{AppleEmail, AppleIdentity, IdentityWithPendingNonce, RealUserStatus};
 pub use token_exchange::{AppleTokenConfig, RefreshToken};
 pub use transport::{HttpGet, HttpPost, HttpTransport, TransportError};
 
@@ -30,6 +31,24 @@ pub use token_exchange::test_fixtures;
 
 use jsonwebtoken::EncodingKey;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
+
+/// ASCII-case-insensitive and constant-time. Case-insensitivity preserves
+/// pergamen-server's current behaviour (the hex SHA-256 round-trips through the
+/// client, which may hex-encode in upper case); constant time protects callers
+/// whose `expected_nonce` is a server-side secret from a timing side channel —
+/// see docs/architecture.md for how much that actually buys and its limits.
+/// Only `sign_in_with_nonce` goes through here: on the `sign_in` callback path
+/// the comparison happens inside the caller's closure, which idunn cannot make
+/// constant-time.
+fn nonce_eq(candidate: Option<&str>, expected: &str) -> bool {
+    let Some(candidate) = candidate else {
+        return false;
+    };
+    let candidate = candidate.to_ascii_lowercase();
+    let expected = expected.to_ascii_lowercase();
+    candidate.as_bytes().ct_eq(expected.as_bytes()).into()
+}
 
 /// What `AppleAuthClient::exchange_authorization_code` carries back: the
 /// refresh token from the exchange plus the identity from the `id_token` Apple
@@ -46,6 +65,21 @@ pub struct SignInDetails {
     /// [`IdentityWithPendingNonce::nonce`] for why idunn cannot do it and what
     /// `None` means.
     pub nonce: Option<String>,
+    /// Apple's refresh token. Store it: revoking it is how an app satisfies
+    /// Apple's mandatory account-deletion requirement (TN3194).
+    pub refresh_token: RefreshToken,
+    /// The identity from the exchange's `id_token`, already verified.
+    pub identity: AppleIdentity,
+}
+
+/// A fully checked Apple sign-in: both the identity token and the exchanged
+/// `id_token` were verified, both nonces were matched, and the two tokens are
+/// for the same Apple user. There is deliberately no `nonce` field — unlike
+/// `SignInDetails`, no verification obligation is left on the caller.
+///
+/// Only constructible through `AppleAuthClient::sign_in`/`sign_in_with_nonce`.
+#[derive(Debug, Clone)]
+pub struct AppleSignIn {
     /// Apple's refresh token. Store it: revoking it is how an app satisfies
     /// Apple's mandatory account-deletion requirement (TN3194).
     pub refresh_token: RefreshToken,
@@ -127,6 +161,134 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         self.identity_verification.refresh_keystore().await
     }
 
+    /// Verify an identity token, exchange an authorization code, and check
+    /// that both agree on the nonce and the Apple user — the safe, batteries-
+    /// included path for a typical Sign in with Apple flow.
+    ///
+    /// `nonce_checker` receives the token's `nonce` claim verbatim (`None` is
+    /// only possible under `NoncePolicy::Permissive`). `Ok(false)` means it
+    /// doesn't match; `Err(_)` means the check itself couldn't be completed
+    /// (e.g. a database lookup failed), and becomes `SignInError::NonceCheckFailed`
+    /// so that an infra hiccup never looks like a bad nonce. It is called twice:
+    /// once for `identity_token`, once for the `id_token` the exchange returns.
+    ///
+    /// Order of operations, and why: `identity_token` is verified and its nonce
+    /// checked *first*, since — unlike exchanging the code — that spends nothing
+    /// at Apple, so a bad identity token or nonce is rejected for free
+    /// (`IdentityTokenRejected`/`NonceMismatch`, no network call to Apple's
+    /// token endpoint at all). Only past that point does the authorization code
+    /// get exchanged, which issues a live refresh token at Apple. From there,
+    /// every remaining failure — the exchanged `id_token` failing verification,
+    /// its nonce not matching, or it naming a different Apple user than
+    /// `identity_token` did (`PostExchangeRejection`) — means a live,
+    /// unusable token exists, so `sign_in` makes one revocation attempt before
+    /// returning: `RejectedAfterExchange` if that succeeds,
+    /// `RevocationRequired` (carrying the token back) if it doesn't. See
+    /// docs/architecture.md for why exactly one attempt, and why the two are
+    /// split into different variants.
+    pub async fn sign_in<F>(
+        &self,
+        identity_token: &str,
+        authorization_code: &str,
+        nonce_checker: F,
+    ) -> Result<AppleSignIn, SignInError>
+    where
+        F: AsyncFn(Option<&str>) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let verified = self.verify_identity_token(identity_token).await?;
+        match nonce_checker(verified.nonce.as_deref()).await {
+            Ok(true) => {}
+            Ok(false) => return Err(SignInError::NonceMismatch),
+            Err(cause) => return Err(SignInError::NonceCheckFailed(cause)),
+        }
+
+        let details = match self.exchange_authorization_code(authorization_code).await {
+            Ok(details) => details,
+            Err(CodeExchangeError::Exchange(err)) => return Err(err.into()),
+            Err(CodeExchangeError::ExchangedTokenUnverified {
+                refresh_token,
+                cause,
+            }) => {
+                return Err(self
+                    .fail_after_exchange(refresh_token, PostExchangeRejection::TokenUnverified(cause))
+                    .await);
+            }
+        };
+
+        // A failed lookup here still leaves a live token behind, so it's treated the
+        // same as an outright mismatch — both must revoke — rather than surfacing a
+        // separate `NonceCheckFailed` the way the pre-exchange check does.
+        let nonce_ok = nonce_checker(details.nonce.as_deref()).await.unwrap_or(false);
+        if !nonce_ok {
+            return Err(self
+                .fail_after_exchange(details.refresh_token, PostExchangeRejection::NonceMismatch)
+                .await);
+        }
+
+        if details.identity.apple_user_id != verified.identity.apple_user_id {
+            return Err(self
+                .fail_after_exchange(details.refresh_token, PostExchangeRejection::SubjectMismatch)
+                .await);
+        }
+
+        Ok(AppleSignIn {
+            refresh_token: details.refresh_token,
+            identity: details.identity,
+        })
+    }
+
+    /// Convenience overload: `sign_in` with a checker that compares the claim
+    /// directly against `expected_nonce` — constant-time and
+    /// ASCII-case-insensitive, see `nonce_eq`.
+    ///
+    /// A missing nonce (`None`) is always a rejection here, even under
+    /// `NoncePolicy::Permissive`. This isn't `NoncePolicy` being re-litigated —
+    /// `verify_identity_token` already decided a `None` here is legitimately
+    /// absent, not malformed. It's that "does the claim equal this string" has
+    /// nothing to compare when there's no claim, and silently accepting that
+    /// would quietly drop replay protection for exactly the clients
+    /// `Permissive` was configured to admit. A caller that needs to accept a
+    /// nonce-less `Permissive` flow has to decide *how* (e.g. a replay-detection
+    /// window built from `AppleIdentity::issued_at`/`expiration`, as
+    /// `NoncePolicy` documents) — idunn can't choose that for you, so use
+    /// `sign_in` directly with a checker that handles `None` itself:
+    ///
+    /// ```ignore
+    /// client.sign_in(identity_token, code, async |candidate| match candidate {
+    ///     Some(nonce) => Ok(nonce == expected_nonce),
+    ///     None => Ok(my_replay_store.check_and_record(identity_token).await),
+    /// }).await
+    /// ```
+    pub async fn sign_in_with_nonce(
+        &self,
+        identity_token: &str,
+        authorization_code: &str,
+        expected_nonce: &str,
+    ) -> Result<AppleSignIn, SignInError> {
+        self.sign_in(identity_token, authorization_code, async |candidate| {
+            Ok(nonce_eq(candidate, expected_nonce))
+        })
+        .await
+    }
+
+    /// One revocation attempt for a refresh token that can't be used — the
+    /// exchange already spent the authorization code, so this token is either
+    /// revoked here or handed back to the caller; see `SignInError`.
+    async fn fail_after_exchange(
+        &self,
+        refresh_token: RefreshToken,
+        cause: PostExchangeRejection,
+    ) -> SignInError {
+        match self.revoke_refresh_token(refresh_token.as_str()).await {
+            Ok(()) => SignInError::RejectedAfterExchange { cause },
+            Err(revocation_error) => SignInError::RevocationRequired {
+                refresh_token,
+                cause,
+                revocation_error,
+            },
+        }
+    }
+
     /// Verify and decode an Apple identity JWT: its signature (against Apple's
     /// published JWKS), `iss`, `aud` and `exp` are all checked, and its nonce
     /// *presence* is enforced per the configured `NoncePolicy`. The nonce
@@ -151,13 +313,13 @@ impl<T: HttpTransport> AppleAuthClient<T> {
     ///
     /// If the exchange succeeds but verification fails, Apple has already
     /// issued a live refresh token against a now-consumed authorization code;
-    /// the returned `SignInError::ExchangedTokenUnverified` carries that token
-    /// so the caller can revoke it (`revoke_refresh_token`) instead of losing
-    /// track of it.
+    /// the returned `CodeExchangeError::ExchangedTokenUnverified` carries that
+    /// token so the caller can revoke it (`revoke_refresh_token`) instead of
+    /// losing track of it.
     pub async fn exchange_authorization_code(
         &self,
         authorization_code: &str,
-    ) -> Result<SignInDetails, SignInError> {
+    ) -> Result<SignInDetails, CodeExchangeError> {
         let tokens = token_exchange::exchange_authorization_code(
             &self.transport,
             &self.credentials.token_config,
@@ -171,7 +333,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
                 refresh_token: tokens.refresh_token,
                 identity,
             }),
-            Err(cause) => Err(SignInError::ExchangedTokenUnverified {
+            Err(cause) => Err(CodeExchangeError::ExchangedTokenUnverified {
                 refresh_token: tokens.refresh_token,
                 cause,
             }),

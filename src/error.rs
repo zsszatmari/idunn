@@ -144,8 +144,9 @@ pub enum TokenRevocationError {
 }
 
 /// Error from `AppleAuthClient::exchange_authorization_code`.
+#[non_exhaustive]
 #[derive(Debug, Error)]
-pub enum SignInError {
+pub enum CodeExchangeError {
     #[error(transparent)]
     Exchange(#[from] TokenExchangeError),
     /// The authorization code was exchanged successfully, but the `id_token`
@@ -161,6 +162,67 @@ pub enum SignInError {
         refresh_token: RefreshToken,
         #[source]
         cause: VerificationError,
+    },
+}
+
+/// Why `AppleAuthClient::sign_in` rejected a sign-in *after* the authorization
+/// code was already exchanged for a live refresh token — see
+/// `SignInError::RejectedAfterExchange`/`RevocationRequired`.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum PostExchangeRejection {
+    /// Apple's token endpoint exchanged the code, but the `id_token` it returned
+    /// alongside failed verification.
+    #[error("the id_token returned with the exchange failed verification")]
+    TokenUnverified(#[source] VerificationError),
+    /// The exchanged `id_token`'s nonce doesn't match the expected value.
+    #[error("the exchanged id_token's nonce does not match the expected value")]
+    NonceMismatch,
+    /// The exchanged `id_token` is for a different Apple user than the caller's
+    /// identity token — someone else's identity token paired with the caller's
+    /// own authorization code.
+    #[error("the exchanged id_token is for a different Apple user than the identity token")]
+    SubjectMismatch,
+}
+
+/// Error from `AppleAuthClient::sign_in`/`sign_in_with_nonce`.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum SignInError {
+    // --- BEFORE the exchange: nothing was spent at Apple, no token exists ---
+    #[error(transparent)]
+    IdentityTokenRejected(#[from] VerificationError),
+    #[error("the identity token's nonce does not match the expected value")]
+    NonceMismatch,
+    /// The nonce check itself could not be completed (e.g. the caller's session
+    /// lookup failed). This does *not* mean the nonce was wrong.
+    #[error("the nonce check could not be completed: {0}")]
+    NonceCheckFailed(Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Exchange(#[from] TokenExchangeError),
+
+    // --- AFTER the exchange: a live refresh token existed ---
+    /// Rejected after the exchange, but the refresh token Apple issued was
+    /// successfully revoked: nothing is left for the caller to do.
+    #[error(
+        "sign-in rejected after the authorization code was exchanged; the refresh token was revoked"
+    )]
+    RejectedAfterExchange {
+        #[source]
+        cause: PostExchangeRejection,
+    },
+    /// Rejected after the exchange, **and the revocation also failed**: the
+    /// refresh token stays live at Apple. The caller must retry
+    /// [`super::AppleAuthClient::revoke_refresh_token`] with this token until it
+    /// succeeds (TN3194) — this is the last place it can reach the token.
+    #[error(
+        "sign-in rejected after the authorization code was exchanged, and revoking the refresh token failed — the caller must retry the revocation"
+    )]
+    RevocationRequired {
+        refresh_token: RefreshToken,
+        cause: PostExchangeRejection,
+        #[source]
+        revocation_error: TokenRevocationError,
     },
 }
 
