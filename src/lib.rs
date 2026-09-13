@@ -425,12 +425,17 @@ mod tests {
     /// with their URL and body so tests can inspect exactly what was sent).
     /// `Clone` shares `get_calls` and `posts` through their `Arc`s, so calls made
     /// through any clone are observed here.
+    ///
+    /// `post_response` answers every POST except the revoke endpoint when
+    /// `revoke_fails` is set — needed to exercise `SignInError::RevocationRequired`,
+    /// where the exchange must succeed but the following revoke must not.
     #[derive(Clone)]
     struct FakeAppleTransport {
         get_calls: Arc<StdMutex<usize>>,
         posts: Arc<StdMutex<Vec<(String, String)>>>,
         jwks_body: String,
         post_response: String,
+        revoke_fails: bool,
     }
 
     impl FakeAppleTransport {
@@ -440,7 +445,13 @@ mod tests {
                 posts: Arc::default(),
                 jwks_body: jwks_body.into(),
                 post_response: post_response.into(),
+                revoke_fails: false,
             }
+        }
+
+        fn with_revoke_failing(mut self) -> Self {
+            self.revoke_fails = true;
+            self
         }
 
         fn get_calls(&self) -> usize {
@@ -476,6 +487,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((url.to_string(), body.to_string()));
+            if self.revoke_fails && url.ends_with("/auth/revoke") {
+                return Err(TransportError::Http {
+                    status: 500,
+                    body: "revocation failed".to_string(),
+                });
+            }
             Ok(self.post_response.clone())
         }
     }
@@ -501,19 +518,27 @@ mod tests {
         assert_eq!(transport.get_calls(), 1);
     }
 
-    /// Signs an RS256 identity token, playing Apple, with `aud` as its audience —
-    /// the rest of the claims are fixed. Returns the token plus its `iat`/`exp` so
-    /// callers can assert `AppleIdentity::issued_at`/`expiration` exactly.
-    fn signed_identity_token(aud: &str) -> (String, u64, u64) {
+    /// Signs an RS256 identity token, playing Apple, with `aud` as its audience,
+    /// `sub` as the Apple user id, and a fixed `nonce` of `"expected-nonce"` —
+    /// the rest of the claims are fixed. Returns the token plus its `iat`/`exp`
+    /// so callers can assert `AppleIdentity::issued_at`/`expiration` exactly.
+    fn signed_identity_token(aud: &str, sub: &str) -> (String, u64, u64) {
+        signed_identity_token_with_nonce(aud, sub, "expected-nonce")
+    }
+
+    /// As `signed_identity_token`, with the `nonce` claim also given explicitly —
+    /// for tests that need a token whose nonce does *not* match what the client
+    /// expects.
+    fn signed_identity_token_with_nonce(aud: &str, sub: &str, nonce: &str) -> (String, u64, u64) {
         let iat = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let exp = iat + 3600;
         let claims = serde_json::json!({
-            "sub": "apple-user-1",
+            "sub": sub,
             "email": "user@example.com",
-            "nonce": "expected-nonce",
+            "nonce": nonce,
             "iss": "https://appleid.apple.com",
             "aud": aud,
             "iat": iat,
@@ -564,7 +589,7 @@ mod tests {
     #[tokio::test]
     async fn verify_identity_token_returns_the_identity_from_a_token_signed_by_apple() {
         let config = test_token_config();
-        let (token, iat, exp) = signed_identity_token(&config.client_id);
+        let (token, iat, exp) = signed_identity_token(&config.client_id, "apple-user-1");
         let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
         let client = AppleAuthClient::with_transport(
             config,
@@ -593,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn verify_identity_token_validates_audience_against_the_configured_client_id() {
         let original_config = test_token_config();
-        let (token, _, _) = signed_identity_token(&original_config.client_id);
+        let (token, _, _) = signed_identity_token(&original_config.client_id, "apple-user-1");
         let mut config = original_config;
         config.client_id = "com.example.other".to_string();
         let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
@@ -617,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn exchange_authorization_code_posts_a_signed_client_secret_and_returns_the_tokens() {
         let config = test_token_config();
-        let (id_token, _, _) = signed_identity_token(&config.client_id);
+        let (id_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
         let transport = FakeAppleTransport::new(
             jwks_body_including(TEST_KID),
             format!(
@@ -675,7 +700,7 @@ mod tests {
         let result = client.exchange_authorization_code("auth-code").await;
 
         match result {
-            Err(SignInError::ExchangedTokenUnverified {
+            Err(CodeExchangeError::ExchangedTokenUnverified {
                 refresh_token,
                 cause,
             }) => {
@@ -714,5 +739,191 @@ mod tests {
             Some("com.example.myapp")
         );
         assert_client_secret_matches_config(&form_field(body, "client_secret").unwrap());
+    }
+
+    /// Builds a client and an exchange response whose `id_token` is itself a
+    /// freshly signed, valid identity token for `sub` — the shape every
+    /// `sign_in`/`sign_in_with_nonce` test starts from, since it lets each test
+    /// tweak exactly one thing (a nonce, a `sub`) and still get a well-formed
+    /// exchange otherwise. Returns the client, the caller's identity token, and
+    /// the transport (so posts can be inspected).
+    fn client_for_sign_in(
+        exchanged_nonce: &str,
+        exchanged_sub: &str,
+    ) -> (
+        AppleAuthClient<FakeAppleTransport>,
+        String,
+        FakeAppleTransport,
+    ) {
+        let config = test_token_config();
+        let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
+        let (exchanged_id_token, _, _) =
+            signed_identity_token_with_nonce(&config.client_id, exchanged_sub, exchanged_nonce);
+        let transport = FakeAppleTransport::new(
+            jwks_body_including(TEST_KID),
+            format!(
+                r#"{{"access_token":"at","refresh_token":"rt","id_token":"{exchanged_id_token}","expires_in":3600}}"#
+            ),
+        );
+        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
+            .expect("valid test key should construct client");
+        (client, identity_token, transport)
+    }
+
+    #[tokio::test]
+    async fn sign_in_returns_the_identity_when_both_tokens_verify() {
+        let (client, identity_token, transport) =
+            client_for_sign_in("expected-nonce", "apple-user-1");
+
+        let sign_in = client
+            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .await
+            .unwrap();
+
+        assert_eq!(sign_in.refresh_token.as_str(), "rt");
+        assert_eq!(sign_in.identity.apple_user_id, "apple-user-1");
+        assert_eq!(transport.posts().len(), 1);
+        assert_eq!(transport.posts()[0].0, "https://appleid.apple.com/auth/token");
+    }
+
+    /// A mismatched identity-token nonce is rejected before the authorization
+    /// code is ever exchanged — pins that `sign_in` checks the free thing first.
+    #[tokio::test]
+    async fn sign_in_rejects_a_mismatched_identity_token_nonce_without_spending_the_code() {
+        let (client, identity_token, transport) =
+            client_for_sign_in("expected-nonce", "apple-user-1");
+
+        let result = client
+            .sign_in_with_nonce(&identity_token, "auth-code", "wrong-nonce")
+            .await;
+
+        assert!(matches!(result, Err(SignInError::NonceMismatch)));
+        assert!(transport.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_unverifiable() {
+        let config = test_token_config();
+        let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
+        let transport = FakeAppleTransport::new(
+            jwks_body_including(TEST_KID),
+            r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
+        );
+        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
+            .expect("valid test key should construct client");
+
+        let result = client
+            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SignInError::RejectedAfterExchange {
+                cause: PostExchangeRejection::TokenUnverified(_)
+            })
+        ));
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[1].0, "https://appleid.apple.com/auth/revoke");
+    }
+
+    #[tokio::test]
+    async fn sign_in_revokes_the_refresh_token_when_the_exchanged_nonce_does_not_match() {
+        let (client, identity_token, transport) =
+            client_for_sign_in("a-different-nonce", "apple-user-1");
+
+        let result = client
+            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SignInError::RejectedAfterExchange {
+                cause: PostExchangeRejection::NonceMismatch
+            })
+        ));
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[1].0, "https://appleid.apple.com/auth/revoke");
+    }
+
+    /// Regression test for the identity-confusion gap this crate's `sign_in`
+    /// closes: pairing one Apple user's identity token with an authorization
+    /// code that resolves to a different Apple user.
+    #[tokio::test]
+    async fn sign_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_for_another_user() {
+        let (client, identity_token, transport) =
+            client_for_sign_in("expected-nonce", "apple-user-2");
+
+        let result = client
+            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SignInError::RejectedAfterExchange {
+                cause: PostExchangeRejection::SubjectMismatch
+            })
+        ));
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[1].0, "https://appleid.apple.com/auth/revoke");
+    }
+
+    #[tokio::test]
+    async fn sign_in_hands_back_the_refresh_token_when_the_revocation_also_fails() {
+        let config = test_token_config();
+        let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
+        let transport = FakeAppleTransport::new(
+            jwks_body_including(TEST_KID),
+            r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
+        )
+        .with_revoke_failing();
+        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport)
+            .expect("valid test key should construct client");
+
+        let result = client
+            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .await;
+
+        match result {
+            Err(SignInError::RevocationRequired {
+                refresh_token,
+                cause: PostExchangeRejection::TokenUnverified(_),
+                ..
+            }) => {
+                assert_eq!(refresh_token.as_str(), "rt");
+            }
+            other => panic!("expected RevocationRequired, got {other:?}"),
+        }
+    }
+
+    /// A nonce lookup that fails outright (e.g. a database error) must not be
+    /// reported the same way as a nonce the caller actually rejected.
+    #[tokio::test]
+    async fn sign_in_reports_a_failed_nonce_lookup_separately_from_a_mismatch() {
+        let (client, identity_token, transport) =
+            client_for_sign_in("expected-nonce", "apple-user-1");
+
+        let result = client
+            .sign_in(&identity_token, "auth-code", async |_candidate| {
+                Err("session store unavailable".into())
+            })
+            .await;
+
+        assert!(matches!(result, Err(SignInError::NonceCheckFailed(_))));
+        assert!(transport.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_in_with_nonce_matches_case_insensitively() {
+        let (client, identity_token, _transport) =
+            client_for_sign_in("Expected-Nonce", "apple-user-1");
+
+        let result = client
+            .sign_in_with_nonce(&identity_token, "auth-code", "EXPECTED-NONCE")
+            .await;
+
+        assert!(result.is_ok());
     }
 }
