@@ -19,16 +19,71 @@ pub enum NoncePolicy {
     Permissive,
 }
 
-/// Configures identity-token verification: the nonce-presence policy applied
-/// to a decoded token, and the behaviour of the JWKS key cache that backs
-/// signature checking (how eagerly Apple's published keys are refreshed, how
-/// hard the fetch is rate-limited, and how stale a cached key set may get
-/// before it is refused outright).
+// Sealing `NonceRequirement` behind a private supertrait in a private module is the
+// standard sealed-trait idiom: the trait itself must be `pub` (it appears in
+// `AppleAuthClient<T, N: NonceRequirement>`'s public bound), but `sealed::Sealed` can't
+// be named outside this crate, so no downstream type can implement `NonceRequirement`
+// and no third policy can appear. `Strict`/`Permissive` are the only two that ever will.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Selects, at compile time, which [`NoncePolicy`] an `AppleAuthClient` enforces —
+/// see [`Strict`] and [`Permissive`], the only two implementors. Sealed: cannot be
+/// implemented outside this crate.
+///
+/// This exists so that `AppleAuthClient::sign_in_with_nonce` — which compares a
+/// token's `nonce` claim against one fixed expected value — can be **absent**
+/// (a compile error, not a runtime one) on a client configured with
+/// `NoncePolicy::Permissive`, under which a token may legitimately carry no
+/// `nonce` claim at all, leaving nothing for `sign_in_with_nonce` to compare
+/// against. See docs/architecture.md ("Why the nonce policy is a type
+/// parameter") for why this is a type parameter rather than a runtime check,
+/// and why it doesn't reopen `AppleAuthClient`'s single-constructor design.
+pub trait NonceRequirement: sealed::Sealed {
+    /// The runtime policy this type selects. Not meant to be read by callers —
+    /// `AppleAuthClient::with_transport` uses it to configure identity-token
+    /// verification internally.
+    #[doc(hidden)]
+    const POLICY: NoncePolicy;
+}
+
+/// Type-level marker selecting [`NoncePolicy::Strict`]. Distinct from that enum
+/// variant — this is a type, used as `AppleAuthClient`'s second type parameter
+/// (its default), not a value.
+#[derive(Clone, Copy, Debug)]
+pub struct Strict;
+
+/// Type-level marker selecting [`NoncePolicy::Permissive`]. Distinct from that
+/// enum variant — this is a type, used as `AppleAuthClient`'s second type
+/// parameter, not a value. A client built with this marker has no
+/// `sign_in_with_nonce` method; use `AppleAuthClient::sign_in` with a checker
+/// that decides what a missing nonce means for your flow.
+#[derive(Clone, Copy, Debug)]
+pub struct Permissive;
+
+impl sealed::Sealed for Strict {}
+impl sealed::Sealed for Permissive {}
+
+impl NonceRequirement for Strict {
+    const POLICY: NoncePolicy = NoncePolicy::Strict;
+}
+
+impl NonceRequirement for Permissive {
+    const POLICY: NoncePolicy = NoncePolicy::Permissive;
+}
+
+/// Configures identity-token verification: the behaviour of the JWKS key cache
+/// that backs signature checking (how eagerly Apple's published keys are
+/// refreshed, how hard the fetch is rate-limited, and how stale a cached key
+/// set may get before it is refused outright).
+///
+/// The nonce-presence policy is **not** here — it moved to `AppleAuthClient`'s
+/// `N: NonceRequirement` type parameter (`Strict`/`Permissive`) so that
+/// `sign_in_with_nonce`'s availability tracks it at compile time. See
+/// docs/architecture.md ("Why the nonce policy is a type parameter").
 #[derive(Clone, Copy, Debug)]
 pub struct VerificationConfig {
-    /// How a token that carries no `nonce` claim is handled — see
-    /// [`NoncePolicy`].
-    pub nonce_policy: NoncePolicy,
     /// How long a successful fetch stays "fresh" before `get_key`'s lazy path
     /// tries again, even if every requested kid is still present — protects
     /// against holding a key Apple has since revoked. Not a hard expiry: a
@@ -74,7 +129,6 @@ pub struct VerificationConfig {
 impl Default for VerificationConfig {
     fn default() -> Self {
         Self {
-            nonce_policy: NoncePolicy::default(),
             refresh_interval: Duration::from_secs(6 * 60 * 60),
             cooldown_period: Duration::from_secs(60),
             stale_key_grace_period: Duration::from_secs(10 * 60),

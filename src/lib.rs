@@ -10,7 +10,7 @@ mod jwks_store;
 mod token_exchange;
 mod transport;
 
-pub use config::{NoncePolicy, VerificationConfig};
+pub use config::{NoncePolicy, NonceRequirement, Permissive, Strict, VerificationConfig};
 pub use error::{
     AppleErrorCode, ClientSecretError, CodeExchangeError, InvalidPrivateKeyError,
     InvalidTokenCause, PostExchangeRejection, SignInError, TokenExchangeError,
@@ -30,17 +30,15 @@ pub use transport::ReqwestTransport;
 pub use token_exchange::test_fixtures;
 
 use jsonwebtoken::EncodingKey;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
-/// ASCII-case-insensitive and constant-time. Case-insensitivity preserves
-/// pergamen-server's current behaviour (the hex SHA-256 round-trips through the
-/// client, which may hex-encode in upper case); constant time protects callers
-/// whose `expected_nonce` is a server-side secret from a timing side channel —
-/// see docs/architecture.md for how much that actually buys and its limits.
-/// Only `sign_in_with_nonce` goes through here: on the `sign_in` callback path
-/// the comparison happens inside the caller's closure, which idunn cannot make
-/// constant-time.
+/// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
+/// that hex-encode in upper case, constant time protects a server-side-secret
+/// `expected_nonce` from a timing side channel — see docs/architecture.md for
+/// the limits of that protection. Used only by `sign_in_with_nonce`; the
+/// `sign_in` callback path compares inside the caller's own closure.
 fn nonce_eq(candidate: Option<&str>, expected: &str) -> bool {
     let Some(candidate) = candidate else {
         return false;
@@ -112,26 +110,29 @@ struct Credentials {
 /// rather than one fetch per clone. To get genuinely independent state (e.g. a
 /// second app's `client_id`), construct a new client — cloning will never give you
 /// that. See docs/architecture.md for why the shared state sits behind `Arc`.
+///
+/// `N: NonceRequirement` (default `Strict`) selects, at compile time, the
+/// `NoncePolicy` identity-token verification enforces, and with it whether
+/// `sign_in_with_nonce` exists on this client at all — see docs/architecture.md
+/// ("Why the nonce policy is a type parameter") and [`NonceRequirement`].
 #[derive(Clone)]
-pub struct AppleAuthClient<T: HttpTransport> {
+pub struct AppleAuthClient<T: HttpTransport, N: NonceRequirement = Strict> {
     identity_verification: Arc<identity_verification::IdentityVerificationClient<T>>,
     credentials: Arc<Credentials>,
     transport: T,
+    // `fn() -> N` rather than `N`: keeps this field `Send + Sync + Clone + Copy`
+    // unconditionally, so `#[derive(Clone)]` above never demands `N: Clone` — `N`
+    // is a zero-sized marker type (`Strict`/`Permissive`), never a stored value.
+    _nonce_requirement: PhantomData<fn() -> N>,
 }
 
-#[cfg(feature = "reqwest")]
-impl AppleAuthClient<transport::ReqwestTransport> {
-    pub fn new(token_config: AppleTokenConfig) -> Result<Self, InvalidPrivateKeyError> {
-        Self::with_transport(
-            token_config,
-            VerificationConfig::default(),
-            transport::ReqwestTransport::default(),
-        )
-    }
-}
-
-impl<T: HttpTransport> AppleAuthClient<T> {
-    pub fn with_transport(
+impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
+    // `N` only appears here as `N::POLICY`, with no argument to infer it from,
+    // so an unannotated call to a `pub` function under this name would leave
+    // `N` ambiguous. `with_transport`/`new` below are `pub`, one per concrete
+    // `N`, and delegate here; `with_nonce_requirement` also delegates here for
+    // a caller who names `N` explicitly via turbofish.
+    fn build(
         token_config: AppleTokenConfig,
         config: VerificationConfig,
         transport: T,
@@ -142,6 +143,7 @@ impl<T: HttpTransport> AppleAuthClient<T> {
             Arc::new(identity_verification::IdentityVerificationClient::new(
                 &token_config.client_id,
                 config,
+                N::POLICY,
                 transport.clone(),
             ));
         Ok(Self {
@@ -151,7 +153,20 @@ impl<T: HttpTransport> AppleAuthClient<T> {
                 signing_key,
             }),
             transport,
+            _nonce_requirement: PhantomData,
         })
+    }
+
+    /// Constructs a client for an explicit `N`, e.g.
+    /// `AppleAuthClient::<_, Permissive>::with_nonce_requirement(...)`.
+    /// `with_transport`/`new` cover the default `Strict` case without naming
+    /// `N` at all.
+    pub fn with_nonce_requirement(
+        token_config: AppleTokenConfig,
+        config: VerificationConfig,
+        transport: T,
+    ) -> Result<Self, InvalidPrivateKeyError> {
+        Self::build(token_config, config, transport)
     }
 
     /// Returns how long the caller should wait before calling again — see
@@ -237,40 +252,6 @@ impl<T: HttpTransport> AppleAuthClient<T> {
         })
     }
 
-    /// Convenience overload: `sign_in` with a checker that compares the claim
-    /// directly against `expected_nonce` — constant-time and
-    /// ASCII-case-insensitive, see `nonce_eq`.
-    ///
-    /// A missing nonce (`None`) is always a rejection here, even under
-    /// `NoncePolicy::Permissive`. This isn't `NoncePolicy` being re-litigated —
-    /// `verify_identity_token` already decided a `None` here is legitimately
-    /// absent, not malformed. It's that "does the claim equal this string" has
-    /// nothing to compare when there's no claim, and silently accepting that
-    /// would quietly drop replay protection for exactly the clients
-    /// `Permissive` was configured to admit. A caller that needs to accept a
-    /// nonce-less `Permissive` flow has to decide *how* (e.g. a replay-detection
-    /// window built from `AppleIdentity::issued_at`/`expiration`, as
-    /// `NoncePolicy` documents) — idunn can't choose that for you, so use
-    /// `sign_in` directly with a checker that handles `None` itself:
-    ///
-    /// ```ignore
-    /// client.sign_in(identity_token, code, async |candidate| match candidate {
-    ///     Some(nonce) => Ok(nonce == expected_nonce),
-    ///     None => Ok(my_replay_store.check_and_record(identity_token).await),
-    /// }).await
-    /// ```
-    pub async fn sign_in_with_nonce(
-        &self,
-        identity_token: &str,
-        authorization_code: &str,
-        expected_nonce: &str,
-    ) -> Result<AppleSignIn, SignInError> {
-        self.sign_in(identity_token, authorization_code, async |candidate| {
-            Ok(nonce_eq(candidate, expected_nonce))
-        })
-        .await
-    }
-
     /// One revocation attempt for a refresh token that can't be used — the
     /// exchange already spent the authorization code, so this token is either
     /// revoked here or handed back to the caller; see `SignInError`.
@@ -352,6 +333,72 @@ impl<T: HttpTransport> AppleAuthClient<T> {
             &self.credentials.signing_key,
             refresh_token,
         )
+        .await
+    }
+}
+
+/// Constructs a `NoncePolicy::Strict` client — `AppleAuthClient`'s default `N`
+/// — so `with_transport`/`new` need no type annotation. The only impl naming
+/// `with_transport`/`new`: a second impl under those names, pinned to a
+/// different `N`, would make an unannotated call ambiguous. A `Permissive`
+/// client is built with `with_nonce_requirement` instead.
+impl<T: HttpTransport> AppleAuthClient<T, Strict> {
+    pub fn with_transport(
+        token_config: AppleTokenConfig,
+        config: VerificationConfig,
+        transport: T,
+    ) -> Result<Self, InvalidPrivateKeyError> {
+        Self::build(token_config, config, transport)
+    }
+}
+
+#[cfg(feature = "reqwest")]
+impl AppleAuthClient<transport::ReqwestTransport, Strict> {
+    pub fn new(token_config: AppleTokenConfig) -> Result<Self, InvalidPrivateKeyError> {
+        Self::with_transport(
+            token_config,
+            VerificationConfig::default(),
+            transport::ReqwestTransport::default(),
+        )
+    }
+}
+
+/// `sign_in_with_nonce` only exists on a `Strict`-policy client — see
+/// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
+/// type parameter") for why a `Permissive` client has no such method at all,
+/// rather than one that can fail at runtime.
+impl<T: HttpTransport> AppleAuthClient<T, Strict> {
+    /// Convenience overload: `sign_in` with a checker that compares the claim
+    /// directly against `expected_nonce` — constant-time and
+    /// ASCII-case-insensitive, see `nonce_eq`.
+    ///
+    /// A missing nonce (`None`) is always a rejection here. Under `Strict` that
+    /// branch is unreachable anyway — `verify_identity_token` already turns a
+    /// missing nonce into `IdentityTokenRejected` before `sign_in`'s checker
+    /// ever runs — so this only exists to document that `sign_in_with_nonce`
+    /// makes no exception for `NoncePolicy::Permissive` either: because it's a
+    /// `Strict`-only method (see `NonceRequirement`), it can't be called on a
+    /// `Permissive` client in the first place. A caller that needs a
+    /// `Permissive`, nonce-less flow uses `sign_in` directly with a checker
+    /// that decides what a missing nonce means for it (e.g. a replay-detection
+    /// window built from `AppleIdentity::issued_at`/`expiration`, as
+    /// `NoncePolicy` documents) — idunn can't choose that for you:
+    ///
+    /// ```ignore
+    /// client.sign_in(identity_token, code, async |candidate| match candidate {
+    ///     Some(nonce) => Ok(nonce == expected_nonce),
+    ///     None => Ok(my_replay_store.check_and_record(identity_token).await),
+    /// }).await
+    /// ```
+    pub async fn sign_in_with_nonce(
+        &self,
+        identity_token: &str,
+        authorization_code: &str,
+        expected_nonce: &str,
+    ) -> Result<AppleSignIn, SignInError> {
+        self.sign_in(identity_token, authorization_code, async |candidate| {
+            Ok(nonce_eq(candidate, expected_nonce))
+        })
         .await
     }
 }

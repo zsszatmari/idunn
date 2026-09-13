@@ -120,11 +120,19 @@ where
 pub(crate) struct IdentityVerificationClient<T: HttpGet> {
     jwks_store: JwksStore<T>,
     validation: Validation,
-    config: VerificationConfig,
+    // Not part of `VerificationConfig` — see docs/architecture.md ("Why the nonce
+    // policy is a type parameter"): it's derived from `AppleAuthClient`'s
+    // `N: NonceRequirement` type parameter, not from a config value.
+    nonce_policy: NoncePolicy,
 }
 
 impl<T: HttpGet> IdentityVerificationClient<T> {
-    pub(crate) fn new(client_id: &str, config: VerificationConfig, transport: T) -> Self {
+    pub(crate) fn new(
+        client_id: &str,
+        config: VerificationConfig,
+        nonce_policy: NoncePolicy,
+        transport: T,
+    ) -> Self {
         // https://developer.apple.com/documentation/signinwithapple/verifying-a-user
         //
         // steps needed to validate the identity token:
@@ -163,7 +171,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
         Self {
             jwks_store: JwksStore::new(config, transport),
             validation,
-            config,
+            nonce_policy,
         }
     }
 
@@ -194,7 +202,7 @@ impl<T: HttpGet> IdentityVerificationClient<T> {
                 .map_err(VerificationError::InvalidToken)?;
 
         if decoded.claims.nonce.is_none() {
-            let nonce_required = match self.config.nonce_policy {
+            let nonce_required = match self.nonce_policy {
                 NoncePolicy::Strict => true,
                 NoncePolicy::Permissive => decoded.claims.nonce_supported == Some(true),
             };
@@ -369,14 +377,19 @@ mod tests {
     }
 
     fn client(transport: MockHttpGet) -> IdentityVerificationClient<MockHttpGet> {
-        client_with_config(transport, VerificationConfig::default())
+        client_with_policy(transport, NoncePolicy::Strict)
     }
 
-    fn client_with_config(
+    fn client_with_policy(
         transport: MockHttpGet,
-        config: VerificationConfig,
+        nonce_policy: NoncePolicy,
     ) -> IdentityVerificationClient<MockHttpGet> {
-        IdentityVerificationClient::new(TEST_BUNDLE_ID, config, transport)
+        IdentityVerificationClient::new(
+            TEST_BUNDLE_ID,
+            VerificationConfig::default(),
+            nonce_policy,
+            transport,
+        )
     }
 
     #[tokio::test]
@@ -640,12 +653,9 @@ mod tests {
         let mut claims = test_claims(None);
         claims.nonce_supported = Some(false);
         let token = sign_token(rs256_header(), &claims);
-        let client = client_with_config(
+        let client = client_with_policy(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            VerificationConfig {
-                nonce_policy: NoncePolicy::Strict,
-                ..VerificationConfig::default()
-            },
+            NoncePolicy::Strict,
         );
 
         let result = client.verify_identity_token(&token).await;
@@ -663,12 +673,9 @@ mod tests {
         let mut claims = test_claims(None);
         claims.nonce_supported = Some(true);
         let token = sign_token(rs256_header(), &claims);
-        let client = client_with_config(
+        let client = client_with_policy(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            VerificationConfig {
-                nonce_policy: NoncePolicy::Strict,
-                ..VerificationConfig::default()
-            },
+            NoncePolicy::Strict,
         );
 
         let result = client.verify_identity_token(&token).await;
@@ -685,12 +692,9 @@ mod tests {
     async fn permissive_policy_accepts_missing_nonce_when_nonce_supported_absent() {
         let claims = test_claims(None);
         let token = sign_token(rs256_header(), &claims);
-        let client = client_with_config(
+        let client = client_with_policy(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            VerificationConfig {
-                nonce_policy: NoncePolicy::Permissive,
-                ..VerificationConfig::default()
-            },
+            NoncePolicy::Permissive,
         );
 
         let IdentityWithPendingNonce { nonce, .. } =
@@ -704,12 +708,9 @@ mod tests {
         let mut claims = test_claims(None);
         claims.nonce_supported = Some(false);
         let token = sign_token(rs256_header(), &claims);
-        let client = client_with_config(
+        let client = client_with_policy(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            VerificationConfig {
-                nonce_policy: NoncePolicy::Permissive,
-                ..VerificationConfig::default()
-            },
+            NoncePolicy::Permissive,
         );
 
         let IdentityWithPendingNonce { nonce, .. } =
@@ -723,12 +724,9 @@ mod tests {
         let mut claims = test_claims(None);
         claims.nonce_supported = Some(true);
         let token = sign_token(rs256_header(), &claims);
-        let client = client_with_config(
+        let client = client_with_policy(
             MockHttpGet::returning(jwks_body_including(TEST_KID)),
-            VerificationConfig {
-                nonce_policy: NoncePolicy::Permissive,
-                ..VerificationConfig::default()
-            },
+            NoncePolicy::Permissive,
         );
 
         let result = client.verify_identity_token(&token).await;
