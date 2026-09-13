@@ -111,10 +111,10 @@ struct Credentials {
 /// second app's `client_id`), construct a new client — cloning will never give you
 /// that. See docs/architecture.md for why the shared state sits behind `Arc`.
 ///
-/// `N: NonceRequirement` (default `Strict`) selects, at compile time, the
-/// `NoncePolicy` identity-token verification enforces, and with it whether
-/// `sign_in_with_nonce` exists on this client at all — see docs/architecture.md
-/// ("Why the nonce policy is a type parameter") and [`NonceRequirement`].
+/// `N: NonceRequirement` (default `Strict`) fixes the `NoncePolicy`
+/// identity-token verification enforces, and whether `sign_in_with_nonce`
+/// exists on this client — see [`NonceRequirement`] and docs/architecture.md
+/// ("Why the nonce policy is a type parameter").
 #[derive(Clone)]
 pub struct AppleAuthClient<T: HttpTransport, N: NonceRequirement = Strict> {
     identity_verification: Arc<identity_verification::IdentityVerificationClient<T>>,
@@ -176,31 +176,25 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         self.identity_verification.refresh_keystore().await
     }
 
-    /// Verify an identity token, exchange an authorization code, and check
-    /// that both agree on the nonce and the Apple user — the safe, batteries-
-    /// included path for a typical Sign in with Apple flow.
+    /// Verifies an identity token, exchanges an authorization code, and checks
+    /// that both agree on the nonce and the Apple user — the full, safe path
+    /// for a typical Sign in with Apple flow.
     ///
-    /// `nonce_checker` receives the token's `nonce` claim verbatim (`None` is
-    /// only possible under `NoncePolicy::Permissive`). `Ok(false)` means it
-    /// doesn't match; `Err(_)` means the check itself couldn't be completed
-    /// (e.g. a database lookup failed), and becomes `SignInError::NonceCheckFailed`
-    /// so that an infra hiccup never looks like a bad nonce. It is called twice:
-    /// once for `identity_token`, once for the `id_token` the exchange returns.
+    /// `nonce_checker` gets the token's `nonce` claim verbatim (`None` only
+    /// under `NoncePolicy::Permissive`), called once for `identity_token` and
+    /// once for the exchanged `id_token`. `Ok(false)` is a mismatch; `Err(_)`
+    /// means the check itself failed (e.g. a database lookup), reported as
+    /// `SignInError::NonceCheckFailed` rather than a false mismatch.
     ///
-    /// Order of operations, and why: `identity_token` is verified and its nonce
-    /// checked *first*, since — unlike exchanging the code — that spends nothing
-    /// at Apple, so a bad identity token or nonce is rejected for free
-    /// (`IdentityTokenRejected`/`NonceMismatch`, no network call to Apple's
-    /// token endpoint at all). Only past that point does the authorization code
-    /// get exchanged, which issues a live refresh token at Apple. From there,
-    /// every remaining failure — the exchanged `id_token` failing verification,
-    /// its nonce not matching, or it naming a different Apple user than
-    /// `identity_token` did (`PostExchangeRejection`) — means a live,
-    /// unusable token exists, so `sign_in` makes one revocation attempt before
-    /// returning: `RejectedAfterExchange` if that succeeds,
-    /// `RevocationRequired` (carrying the token back) if it doesn't. See
-    /// docs/architecture.md for why exactly one attempt, and why the two are
-    /// split into different variants.
+    /// `identity_token` and its nonce are checked first, since exchanging the
+    /// code — unlike verifying a token already in hand — spends the code at
+    /// Apple. A rejection past that point (`PostExchangeRejection`: the
+    /// exchanged `id_token` fails verification, its nonce doesn't match, or it
+    /// names a different Apple user) means a live refresh token now exists, so
+    /// `sign_in` makes one revocation attempt before returning:
+    /// `RejectedAfterExchange` on success, `RevocationRequired` (carrying the
+    /// token) on failure. See docs/architecture.md for why one attempt and why
+    /// two variants.
     pub async fn sign_in<F>(
         &self,
         identity_token: &str,
@@ -363,26 +357,20 @@ impl AppleAuthClient<transport::ReqwestTransport, Strict> {
     }
 }
 
-/// `sign_in_with_nonce` only exists on a `Strict`-policy client — see
+/// `sign_in_with_nonce` exists only here, on a `Strict` client — see
 /// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
-/// type parameter") for why a `Permissive` client has no such method at all,
-/// rather than one that can fail at runtime.
+/// type parameter").
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
-    /// Convenience overload: `sign_in` with a checker that compares the claim
-    /// directly against `expected_nonce` — constant-time and
-    /// ASCII-case-insensitive, see `nonce_eq`.
+    /// `sign_in` with a checker that compares the claim directly against
+    /// `expected_nonce` — constant-time and ASCII-case-insensitive, see
+    /// `nonce_eq`. A missing nonce (`None`) is a rejection, though under
+    /// `Strict` that's moot: `verify_identity_token` already rejects a missing
+    /// nonce as `IdentityTokenRejected` before the checker runs.
     ///
-    /// A missing nonce (`None`) is always a rejection here. Under `Strict` that
-    /// branch is unreachable anyway — `verify_identity_token` already turns a
-    /// missing nonce into `IdentityTokenRejected` before `sign_in`'s checker
-    /// ever runs — so this only exists to document that `sign_in_with_nonce`
-    /// makes no exception for `NoncePolicy::Permissive` either: because it's a
-    /// `Strict`-only method (see `NonceRequirement`), it can't be called on a
-    /// `Permissive` client in the first place. A caller that needs a
-    /// `Permissive`, nonce-less flow uses `sign_in` directly with a checker
-    /// that decides what a missing nonce means for it (e.g. a replay-detection
-    /// window built from `AppleIdentity::issued_at`/`expiration`, as
-    /// `NoncePolicy` documents) — idunn can't choose that for you:
+    /// A `Permissive` client needs `sign_in` directly, with a checker that
+    /// decides what a missing nonce means for its flow (e.g. a
+    /// replay-detection window from `AppleIdentity::issued_at`/`expiration`,
+    /// per `NoncePolicy`):
     ///
     /// ```ignore
     /// client.sign_in(identity_token, code, async |candidate| match candidate {

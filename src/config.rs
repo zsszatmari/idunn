@@ -32,14 +32,11 @@ mod sealed {
 /// see [`Strict`] and [`Permissive`], the only two implementors. Sealed: cannot be
 /// implemented outside this crate.
 ///
-/// This exists so that `AppleAuthClient::sign_in_with_nonce` — which compares a
-/// token's `nonce` claim against one fixed expected value — can be **absent**
-/// (a compile error, not a runtime one) on a client configured with
-/// `NoncePolicy::Permissive`, under which a token may legitimately carry no
-/// `nonce` claim at all, leaving nothing for `sign_in_with_nonce` to compare
-/// against. See docs/architecture.md ("Why the nonce policy is a type
-/// parameter") for why this is a type parameter rather than a runtime check,
-/// and why it doesn't reopen `AppleAuthClient`'s single-constructor design.
+/// `AppleAuthClient::sign_in_with_nonce` compares a token's `nonce` claim
+/// against one fixed expected value, which a `NoncePolicy::Permissive` token
+/// may legitimately not carry at all. This type parameter makes that method
+/// absent — a compile error, not a runtime one — on a `Permissive` client. See
+/// docs/architecture.md ("Why the nonce policy is a type parameter").
 pub trait NonceRequirement: sealed::Sealed {
     /// The runtime policy this type selects. Not meant to be read by callers —
     /// `AppleAuthClient::with_transport` uses it to configure identity-token
@@ -78,10 +75,10 @@ impl NonceRequirement for Permissive {
 /// refreshed, how hard the fetch is rate-limited, and how stale a cached key
 /// set may get before it is refused outright).
 ///
-/// The nonce-presence policy is **not** here — it moved to `AppleAuthClient`'s
-/// `N: NonceRequirement` type parameter (`Strict`/`Permissive`) so that
-/// `sign_in_with_nonce`'s availability tracks it at compile time. See
-/// docs/architecture.md ("Why the nonce policy is a type parameter").
+/// The nonce-presence policy lives on `AppleAuthClient`'s `N: NonceRequirement`
+/// type parameter (`Strict`/`Permissive`), so `sign_in_with_nonce`'s
+/// availability tracks it at compile time. See docs/architecture.md ("Why the
+/// nonce policy is a type parameter").
 #[derive(Clone, Copy, Debug)]
 pub struct VerificationConfig {
     /// How long a successful fetch stays "fresh" before `get_key`'s lazy path

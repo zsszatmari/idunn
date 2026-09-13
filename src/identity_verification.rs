@@ -120,9 +120,8 @@ where
 pub(crate) struct IdentityVerificationClient<T: HttpGet> {
     jwks_store: JwksStore<T>,
     validation: Validation,
-    // Not part of `VerificationConfig` — see docs/architecture.md ("Why the nonce
-    // policy is a type parameter"): it's derived from `AppleAuthClient`'s
-    // `N: NonceRequirement` type parameter, not from a config value.
+    // Comes from `AppleAuthClient`'s `N: NonceRequirement` type parameter — see
+    // docs/architecture.md ("Why the nonce policy is a type parameter").
     nonce_policy: NoncePolicy,
 }
 
