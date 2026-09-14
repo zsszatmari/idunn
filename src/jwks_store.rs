@@ -252,7 +252,6 @@ mod tests {
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::ZERO,
             max_key_age: LONG_MAX_KEY_AGE,
-            ..VerificationConfig::default()
         }
     }
 
@@ -262,7 +261,6 @@ mod tests {
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::ZERO,
             max_key_age: LONG_MAX_KEY_AGE,
-            ..VerificationConfig::default()
         }
     }
 
@@ -275,7 +273,6 @@ mod tests {
             cooldown_period: Duration::from_secs(60),
             stale_key_grace_period: Duration::ZERO,
             max_key_age: LONG_MAX_KEY_AGE,
-            ..VerificationConfig::default()
         }
     }
 
@@ -289,7 +286,6 @@ mod tests {
             cooldown_period: Duration::from_millis(20),
             stale_key_grace_period: Duration::from_secs(60),
             max_key_age: LONG_MAX_KEY_AGE,
-            ..VerificationConfig::default()
         }
     }
 
@@ -426,7 +422,6 @@ mod tests {
                 cooldown_period: Duration::from_millis(10),
                 stale_key_grace_period: Duration::from_millis(20),
                 max_key_age: LONG_MAX_KEY_AGE,
-                ..VerificationConfig::default()
             },
             transport.clone(),
         );
@@ -569,7 +564,6 @@ mod tests {
                 cooldown_period: Duration::from_millis(10),
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_millis(30),
-                ..VerificationConfig::default()
             },
             transport.clone(),
         );
@@ -603,7 +597,6 @@ mod tests {
                 cooldown_period: Duration::from_millis(10),
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_millis(30),
-                ..VerificationConfig::default()
             },
             transport.clone(),
         );

@@ -1135,7 +1135,6 @@ mod tests {
                 cooldown_period: Duration::ZERO,
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_secs(3600),
-                ..VerificationConfig::default()
             };
             let client = AppleAuthClient::with_transport(
                 test_token_config(),
@@ -1171,7 +1170,6 @@ mod tests {
                 cooldown_period: Duration::from_millis(20),
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_secs(3600),
-                ..VerificationConfig::default()
             };
             let client = AppleAuthClient::with_transport(
                 test_token_config(),
