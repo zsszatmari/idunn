@@ -38,7 +38,7 @@ cargo-deny:
     cargo deny check
 
 cooldown:
-    cargo cooldown
+    cargo cooldown metadata >/dev/null
 
 
 # TODO: look into cargo-mutants

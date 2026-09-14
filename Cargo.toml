@@ -13,6 +13,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 subtle = "2.6"
 thiserror = "2.0.20"
+tokio = { version = "1.53.1", optional = true, default-features = false, features = ["rt", "time"] }
 tracing = "0.1.35"
 url = "2.5.8"
 zeroize = { version = "1.9", features = ["derive"] }
@@ -25,16 +26,21 @@ rust_crypto = ["jsonwebtoken/rust_crypto"]
 # Exposes `test_fixtures` to downstream crates so their tests can build an
 # AppleAuthClient without committing a second throwaway key. dev-dependencies only.
 test-fixtures = []
+# Background JWKS-refresh convenience: `AppleAuthClient::with_background_refresh`.
+# Off by default — the runtime choice belongs to the binary, not the library. The
+# runtime-agnostic `keystore_refresh_loop()` is available without this feature.
+tokio-refresh = ["dep:tokio"]
 
 [dev-dependencies]
 env_logger = "0.11"
-# Self-dependency to force the "reqwest" feature on for `cargo test` (and anything
-# built on top of it, e.g. `cargo llvm-cov`) even though it's off by default for
-# plain `cargo build` — tests exercise ReqwestTransport directly.
-idunn = { path = ".", features = ["reqwest"] }
+# Self-dependency to force the "reqwest" and "tokio-refresh" features on for
+# `cargo test` (and anything built on top of it, e.g. `cargo llvm-cov`) even
+# though both are off by default for plain `cargo build` — tests exercise
+# ReqwestTransport and the tokio-gated code directly.
+idunn = { path = ".", features = ["reqwest", "tokio-refresh"] }
 # gzip feature needed for test coverage
 reqwest = { version = "0.13", features = ["gzip"] }
-tokio = { version = "1.53.1", features = ["rt", "macros"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }

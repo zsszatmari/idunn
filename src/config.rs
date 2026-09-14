@@ -37,7 +37,15 @@ mod sealed {
 /// may legitimately not carry at all. This type parameter makes that method
 /// absent — a compile error, not a runtime one — on a `Permissive` client. See
 /// docs/architecture.md ("Why the nonce policy is a type parameter").
-pub trait NonceRequirement: sealed::Sealed {
+///
+/// Bounded by `'static` on top of `Sealed`: both implementors are zero-sized
+/// marker types with no lifetime parameter of their own, so this adds no real
+/// restriction, but it means every `N: NonceRequirement` bound elsewhere in
+/// the crate gets `N: 'static` for free — most usefully for
+/// `AppleAuthClient::with_background_refresh` (`src/lib.rs`, behind the
+/// `tokio-refresh` feature), which spawns a future generic over `N` and so
+/// needs it to be `'static` for `tokio::spawn`/`Handle::spawn`.
+pub trait NonceRequirement: sealed::Sealed + 'static {
     /// The runtime policy this type selects. Not meant to be read by callers —
     /// `AppleAuthClient::with_transport` uses it to configure identity-token
     /// verification internally.

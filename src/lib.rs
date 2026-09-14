@@ -31,8 +31,19 @@ pub use token_exchange::test_fixtures;
 
 use jsonwebtoken::EncodingKey;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 use subtle::ConstantTimeEq;
+
+/// Floor on how long `keystore_refresh_loop` will ever sleep between ticks,
+/// regardless of what `refresh_keystore()` suggests. `refresh_keystore()`
+/// passes through caller-supplied `VerificationConfig` durations verbatim —
+/// `refresh_interval` on success, `cooldown_period` on failure or
+/// cooldown-skip — either of which may be `Duration::ZERO`. On the manual 
+/// `refresh_keystore` path that's the caller's own problem; here the loop owns 
+/// the task, so a `ZERO` config combined with a persistent fetch failure would 
+/// otherwise spin tight and hammer Apple with no rate limit to stop it.
+const MIN_REFRESH_DELAY: Duration = Duration::from_secs(1);
 
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
 /// that hex-encode in upper case, constant time protects a server-side-secret
@@ -172,8 +183,73 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// Returns how long the caller should wait before calling again — see
     /// `JwksStore::refresh_keystore` for what that duration means and when a
     /// call is skipped for arriving too early.
+    ///
+    /// Most callers don't need to drive this by hand: `keystore_refresh_loop`
+    /// (or, with the `tokio-refresh` feature, `with_background_refresh`) does
+    /// it automatically.
     pub async fn refresh_keystore(&self) -> std::time::Duration {
         self.identity_verification.refresh_keystore().await
+    }
+
+    /// Returns a future that keeps the JWKS cache warm by calling
+    /// `refresh_keystore()` in a loop, sleeping between calls with the
+    /// caller-supplied `sleep`. The first tick runs immediately, before any
+    /// sleep, so awaiting this future (or spawning it) warms a cold cache
+    /// right away instead of leaving the first `get_key()` to pay the fetch
+    /// latency. The loop never sleeps for less than one second, even if the
+    /// configured `VerificationConfig` would otherwise suggest less — see
+    /// `MIN_REFRESH_DELAY`.
+    ///
+    /// `idunn` has no runtime dependency of its own: `sleep` is how the
+    /// caller supplies its own timer (e.g. `tokio::time::sleep`, or an
+    /// `async-io`/`smol` equivalent) without idunn depending on any one
+    /// runtime. See docs/architecture.md ("Why background refresh is opt-in
+    /// and takes a `Handle`") for the `tokio-refresh` feature, a thin
+    /// convenience layer built on top of this method.
+    ///
+    /// The returned future holds only a `Weak` reference to this client's
+    /// shared state, not a strong one: it does not keep the client alive, and
+    /// it exits (at the latest, on its next tick) once every clone of this
+    /// `AppleAuthClient` has been dropped. This is what makes it safe to
+    /// spawn onto an executor and forget — the task cannot outlive the client
+    /// and keep polling Apple forever.
+    ///
+    /// The `use<T, N, S, Fut>` is load-bearing, not decorative: edition 2024
+    /// return-position `impl Trait` captures every type/lifetime parameter in
+    /// scope by default, including `&self`'s anonymous lifetime. Without
+    /// naming the precise capture set here, the returned future would be tied
+    /// to `&self`'s lifetime and could not be spawned onto an executor
+    /// (`tokio::spawn` requires `'static`). Listing every type parameter
+    /// (`N` included, even though the future stores nothing of type `N`) but
+    /// no lifetime is what opts the borrow of `self` back out — that's the
+    /// whole point of writing it out explicitly instead of just adding
+    /// `+ 'static`, which would conflict with the implicitly-captured
+    /// `&self` lifetime instead of removing it.
+    pub fn keystore_refresh_loop<S, Fut>(
+        &self,
+        sleep: S,
+    ) -> impl Future<Output = ()> + Send + use<T, N, S, Fut>
+    where
+        S: Fn(Duration) -> Fut + Send + 'static,
+        Fut: Future + Send,
+    {
+        let weak: Weak<identity_verification::IdentityVerificationClient<T>> =
+            Arc::downgrade(&self.identity_verification);
+        async move {
+            loop {
+                let Some(verification) = weak.upgrade() else {
+                    return;
+                };
+                let delay = verification.refresh_keystore().await;
+                // Dropped before sleeping: holding a strong reference across
+                // the sleep would mean the last live clone being dropped
+                // during that sleep goes unnoticed until the *next* tick's
+                // `upgrade()` — delaying, not preventing, task exit, but
+                // needlessly.
+                drop(verification);
+                let _ = sleep(delay.max(MIN_REFRESH_DELAY)).await;
+            }
+        }
     }
 
     /// Verifies an identity token, exchanges an authorization code, and checks
@@ -328,6 +404,36 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
             refresh_token,
         )
         .await
+    }
+}
+
+/// Background JWKS-refresh convenience built on `keystore_refresh_loop`. See
+/// docs/architecture.md ("Why background refresh is opt-in and takes a
+/// `Handle`") for why this takes a `Handle` rather than spawning from inside
+/// a constructor, and why it's gated behind the `tokio-refresh` feature
+/// rather than being unconditional. (`N: NonceRequirement` already implies
+/// `N: 'static`, which `handle.spawn` needs — see `NonceRequirement`'s doc in
+/// `config.rs`.)
+#[cfg(feature = "tokio-refresh")]
+impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
+    /// Spawns a background task that keeps the JWKS cache warm for as long as
+    /// any clone of this client is alive, then returns `self` unchanged so
+    /// this can be chained straight onto a constructor:
+    ///
+    /// ```ignore
+    /// let client = AppleAuthClient::new(token_config)?
+    ///     .with_background_refresh(tokio::runtime::Handle::current());
+    /// ```
+    ///
+    /// `handle` must belong to a runtime with its time driver enabled — the
+    /// `#[tokio::main]` macro and `tokio::runtime::Runtime::new()` both do
+    /// this already; a hand-built `tokio::runtime::Builder` needs an explicit
+    /// `.enable_time()` (or `.enable_all()`), or the spawned task panics the
+    /// first time it calls `tokio::time::sleep`.
+    #[must_use = "with_background_refresh returns `self` for chaining; dropping the result discards the client"]
+    pub fn with_background_refresh(self, handle: tokio::runtime::Handle) -> Self {
+        handle.spawn(self.keystore_refresh_loop(tokio::time::sleep));
+        self
     }
 }
 
@@ -925,5 +1031,182 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    /// Tests for `keystore_refresh_loop`. None of these use `tokio::time`'s
+    /// paused/mocked clock (`start_paused`/`pause()`): `JwksStore` measures
+    /// freshness with `std::time::Instant::elapsed()` (see `jwks_store.rs`),
+    /// which a paused tokio clock has no effect on, so pausing here would
+    /// desync the loop's notion of elapsed time from the sleeps it awaits —
+    /// exactly the kind of busy-loop trap `MIN_REFRESH_DELAY` exists to catch
+    /// in production. Tests 1-3 below run on `#[tokio::test]` (they need *an*
+    /// executor to await a future at all) but drive `keystore_refresh_loop`
+    /// with a plain non-tokio sleep closure — proof the loop itself has no
+    /// tokio dependency.
+    mod keystore_refresh_loop_tests {
+        use super::*;
+
+        /// Wires `client` up to a fake, immediately-resolving `sleep` that
+        /// records every requested duration into `recorded` and, once
+        /// `iterations` durations have been recorded, drops `client` — its
+        /// last strong reference, since `client` is moved in here rather than
+        /// cloned — so the loop's next `Weak::upgrade()` fails and it
+        /// returns. This is what lets a test await the returned future to
+        /// completion instead of needing to time out or abort a task.
+        fn recording_loop<T: HttpTransport, N: NonceRequirement>(
+            client: AppleAuthClient<T, N>,
+            iterations: usize,
+            recorded: Arc<StdMutex<Vec<Duration>>>,
+        ) -> impl Future<Output = ()> + Send + 'static {
+            let holder = Arc::new(StdMutex::new(Some(client)));
+            let guard = holder.lock().unwrap();
+            let holder_for_stop = holder.clone();
+            let future = guard
+                .as_ref()
+                .unwrap()
+                .keystore_refresh_loop(move |d: Duration| {
+                    let count = {
+                        let mut recorded = recorded.lock().unwrap();
+                        recorded.push(d);
+                        recorded.len()
+                    };
+                    if count >= iterations {
+                        *holder_for_stop.lock().unwrap() = None;
+                    }
+                    std::future::ready(())
+                });
+            drop(guard);
+            future
+        }
+
+        #[tokio::test]
+        async fn first_tick_runs_immediately_before_any_sleep() {
+            let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+            let client = AppleAuthClient::with_transport(
+                test_token_config(),
+                VerificationConfig::default(),
+                transport.clone(),
+            )
+            .expect("valid test key should construct client");
+
+            // A sleep that never resolves: proves the fetch that produced
+            // `get_calls() == 1` happened *before* the loop ever reached its
+            // first sleep, not concurrently with it.
+            let task = tokio::spawn(
+                client.keystore_refresh_loop(|_: Duration| std::future::pending::<()>()),
+            );
+
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+
+            assert_eq!(transport.get_calls(), 1);
+            task.abort();
+        }
+
+        #[tokio::test]
+        async fn too_early_ticks_never_refetch_and_stay_near_refresh_interval() {
+            let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+            let config = VerificationConfig::default(); // 6h refresh_interval
+            let client = AppleAuthClient::with_transport(
+                test_token_config(),
+                config,
+                transport.clone(),
+            )
+            .expect("valid test key should construct client");
+
+            let recorded = Arc::new(StdMutex::new(Vec::new()));
+            recording_loop(client, 5, recorded.clone()).await;
+
+            assert_eq!(transport.get_calls(), 1);
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 5);
+            for wait in recorded.iter() {
+                assert!(*wait <= config.refresh_interval);
+                assert!(*wait > config.refresh_interval - Duration::from_secs(1));
+            }
+        }
+
+        #[tokio::test]
+        async fn min_refresh_delay_floors_a_zero_configured_cadence() {
+            let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+            let config = VerificationConfig {
+                refresh_interval: Duration::ZERO,
+                cooldown_period: Duration::ZERO,
+                stale_key_grace_period: Duration::ZERO,
+                max_key_age: Duration::from_secs(3600),
+                ..VerificationConfig::default()
+            };
+            let client = AppleAuthClient::with_transport(
+                test_token_config(),
+                config,
+                transport.clone(),
+            )
+            .expect("valid test key should construct client");
+
+            // With refresh_interval and cooldown_period both zero, every tick
+            // refetches (no early-return, no cooldown skip) — without the
+            // MIN_REFRESH_DELAY floor this would be a busy loop hammering
+            // Apple. `get_calls()` is deliberately not asserted here: with a
+            // zero-cadence config it grows on every iteration by design, and
+            // the floor is what this test is pinning, not the fetch count.
+            let recorded = Arc::new(StdMutex::new(Vec::new()));
+            recording_loop(client, 5, recorded.clone()).await;
+
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 5);
+            for wait in recorded.iter() {
+                assert!(
+                    *wait >= MIN_REFRESH_DELAY,
+                    "expected every recorded sleep to be floored at {MIN_REFRESH_DELAY:?}, got {wait:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn loop_exits_once_every_clone_is_dropped_and_stops_fetching() {
+            let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+            let config = VerificationConfig {
+                refresh_interval: Duration::from_millis(20),
+                cooldown_period: Duration::from_millis(20),
+                stale_key_grace_period: Duration::ZERO,
+                max_key_age: Duration::from_secs(3600),
+                ..VerificationConfig::default()
+            };
+            let client = AppleAuthClient::with_transport(
+                test_token_config(),
+                config,
+                transport.clone(),
+            )
+            .expect("valid test key should construct client");
+
+            // Real tokio::time::sleep and real time throughout: this test is
+            // measuring that the task actually stops running, which a fake,
+            // immediately-resolving sleep can't demonstrate.
+            tokio::spawn(client.keystore_refresh_loop(tokio::time::sleep));
+
+            // Let the first (immediate) tick land.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                transport.get_calls(),
+                1,
+                "expected exactly one fetch from the immediate first tick"
+            );
+
+            drop(client);
+
+            // The loop is now asleep for MIN_REFRESH_DELAY (1s, far longer
+            // than the 20ms refresh_interval/cooldown_period configured
+            // above) before its next `Weak::upgrade()`. Wait past that
+            // floor so the task has woken up, found the client gone, and
+            // returned without fetching again.
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+
+            assert_eq!(
+                transport.get_calls(),
+                1,
+                "task kept fetching after every client clone was dropped"
+            );
+        }
     }
 }

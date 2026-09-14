@@ -61,8 +61,10 @@ impl<T: HttpGet> JwksStore<T> {
         // stale too. Only once that grace period is also spent does a
         // cached-kid lookup fall through to a blocking `try_refresh`, so a
         // brief refresh outage can't stall logins whose kid we already hold.
-        // Callers that want the snapshot kept warmer should drive
-        // `refresh_keystore()` on their own schedule.
+        // Callers that want the snapshot kept warmer can drive
+        // `refresh_keystore()` on their own schedule, or let
+        // `AppleAuthClient::keystore_refresh_loop`/`with_background_refresh`
+        // (src/lib.rs) do it automatically.
         if !self.past_grace_period()
             && !self.snapshot_past_max_age()
             && let Some(key) = self.cached_key(kid)
