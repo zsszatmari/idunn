@@ -1,3 +1,4 @@
+use crate::identity_verification::AppleIdentity;
 use crate::token_exchange::RefreshToken;
 use thiserror::Error;
 
@@ -215,11 +216,20 @@ pub enum SignInError {
     /// refresh token stays live at Apple. The caller must retry
     /// [`super::AppleAuthClient::revoke_refresh_token`] with this token until it
     /// succeeds (TN3194) — this is the last place it can reach the token.
+    ///
+    /// `identity` comes from the caller's *own* identity token, verified before
+    /// the exchange, and is carried so a retry that outlives this call can be
+    /// filed against the sign-in attempt that produced it (`apple_user_id` is
+    /// the JWT `sub`). Note it names the user who attempted the sign-in, not
+    /// necessarily the one Apple considers the token's owner: under
+    /// `PostExchangeRejection::SubjectMismatch` the exchanged `id_token` named a
+    /// different user, which is precisely why the sign-in was rejected.
     #[error(
         "sign-in rejected after the authorization code was exchanged, and revoking the refresh token failed — the caller must retry the revocation"
     )]
     RevocationRequired {
         refresh_token: RefreshToken,
+        identity: AppleIdentity,
         cause: PostExchangeRejection,
         #[source]
         revocation_error: TokenRevocationError,

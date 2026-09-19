@@ -202,7 +202,7 @@ pub async fn revoke_refresh_token<T: HttpPost>(
         ("token_type_hint", "refresh_token"),
     ];
     let encoded_body = encode_form(&form);
-    transport
+    match transport
         .post_form(
             REVOKE_URL,
             &[("Content-Type", "application/x-www-form-urlencoded")],
@@ -210,13 +210,26 @@ pub async fn revoke_refresh_token<T: HttpPost>(
             REQUEST_TIMEOUT,
         )
         .await
-        .map_err(|err| match err {
-            TransportError::Network(e) => TokenRevocationError::NetworkError(e),
-            TransportError::Http { body, .. } => TokenRevocationError::TokenRevocationFailed(
-                AppleErrorCode::from_response_body(body),
-            ),
-        })?;
-    Ok(())
+    {
+        Ok(_) => Ok(()),
+        Err(TransportError::Network(e)) => Err(TokenRevocationError::NetworkError(e)),
+        Err(TransportError::Http { body, .. }) => match AppleErrorCode::from_response_body(body) {
+            // Apple doesn't recognize this as a usable grant any more — already
+            // revoked, expired, or never valid.
+            //
+            // OAuth's `invalid_grant` also covers a token issued to a
+            // different client; for a token this crate obtained with its own
+            // credentials that can't legitimately happen.
+            AppleErrorCode::InvalidGrant => {
+                tracing::warn!(
+                    "Apple rejected the refresh token as invalid_grant while revoking it; \
+                     treating it as already revoked"
+                );
+                Ok(())
+            }
+            code => Err(TokenRevocationError::TokenRevocationFailed(code)),
+        },
+    }
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -441,7 +454,7 @@ mod tests {
         let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
         let transport = FakeTransport::failing_with(TransportError::Http {
             status: 400,
-            body: r#"{"error":"invalid_grant"}"#.to_string(),
+            body: r#"{"error":"invalid_client"}"#.to_string(),
         });
 
         let result = revoke_refresh_token(&transport, &config, &signing_key, "bad-token").await;
@@ -449,9 +462,28 @@ mod tests {
         assert!(matches!(
             result,
             Err(TokenRevocationError::TokenRevocationFailed(
-                AppleErrorCode::InvalidGrant
+                AppleErrorCode::InvalidClient
             ))
         ));
+    }
+
+    /// Apple answering `invalid_grant` to a revoke means it no longer
+    /// recognizes the token as a usable grant — already revoked, expired, or
+    /// never valid. The call's purpose (the token can't be used) already
+    /// holds, so this is treated as success rather than pushed into a retry
+    /// loop that could never succeed.
+    #[tokio::test]
+    async fn treats_invalid_grant_as_a_successful_revocation() {
+        let config = test_config();
+        let signing_key = EncodingKey::from_ec_pem(&config.private_key_pem).unwrap();
+        let transport = FakeTransport::failing_with(TransportError::Http {
+            status: 400,
+            body: r#"{"error":"invalid_grant"}"#.to_string(),
+        });
+
+        let result = revoke_refresh_token(&transport, &config, &signing_key, "bad-token").await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
