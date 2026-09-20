@@ -13,7 +13,7 @@ mod transport;
 pub use config::{NoncePolicy, NonceRequirement, Permissive, Strict, VerificationConfig};
 pub use error::{
     AppleErrorCode, ClientSecretError, CodeExchangeError, InvalidPrivateKeyError,
-    InvalidTokenCause, PostExchangeRejection, SignInError, TokenExchangeError,
+    InvalidTokenCause, PendingRevocation, PostExchangeRejection, SignInError, TokenExchangeError,
     TokenRevocationError, VerificationError,
 };
 pub use identity_verification::{AppleEmail, AppleIdentity, IdentityWithPendingNonce, RealUserStatus};
@@ -268,9 +268,10 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// exchanged `id_token` fails verification, its nonce doesn't match, or it
     /// names a different Apple user) means a live refresh token now exists, so
     /// `sign_in` makes one revocation attempt before returning:
-    /// `RejectedAfterExchange` on success, `RevocationRequired` (carrying the
-    /// token and the verified identity) on failure. See docs/architecture.md
-    /// for why one attempt and why two variants.
+    /// `RejectedAfterExchange` on success, `RevocationRequired` (carrying a
+    /// boxed [`PendingRevocation`] with the token and the verified identity) on
+    /// failure. See docs/architecture.md for why one attempt and why two
+    /// variants.
     // See docs/architecture.md: "Why sign_in's nonce checker is
     // `Fn(Option<String>) -> Fut`, not `AsyncFn`".
     pub async fn sign_in<F, Fut>(
@@ -348,12 +349,12 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     ) -> SignInError {
         match self.revoke_refresh_token(refresh_token.as_str()).await {
             Ok(()) => SignInError::RejectedAfterExchange { cause },
-            Err(revocation_error) => SignInError::RevocationRequired {
+            Err(revocation_error) => SignInError::RevocationRequired(Box::new(PendingRevocation {
                 refresh_token,
                 identity,
                 cause,
                 revocation_error,
-            },
+            })),
         }
     }
 
@@ -936,6 +937,14 @@ mod tests {
         }));
     }
 
+    /// `sign_in` returns `Result<_, SignInError>` from every frame on the success
+    /// path too, so the error stays under clippy's 128-byte `result_large_err`
+    /// budget: `RevocationRequired`'s payload is boxed to keep it there.
+    #[test]
+    fn sign_in_error_stays_small() {
+        assert!(std::mem::size_of::<SignInError>() <= 128);
+    }
+
     #[tokio::test]
     async fn sign_in_returns_the_identity_when_both_tokens_verify() {
         let (client, identity_token, transport) =
@@ -1053,12 +1062,14 @@ mod tests {
             .await;
 
         match result {
-            Err(SignInError::RevocationRequired {
-                refresh_token,
-                identity,
-                cause: PostExchangeRejection::TokenUnverified(_),
-                ..
-            }) => {
+            Err(SignInError::RevocationRequired(pending)) => {
+                let PendingRevocation {
+                    refresh_token,
+                    identity,
+                    cause,
+                    ..
+                } = *pending;
+                assert!(matches!(cause, PostExchangeRejection::TokenUnverified(_)));
                 assert_eq!(refresh_token.as_str(), "rt");
                 assert_eq!(identity.apple_user_id, "apple-user-1");
             }
@@ -1086,11 +1097,9 @@ mod tests {
             .await;
 
         match result {
-            Err(SignInError::RevocationRequired {
-                identity,
-                cause: PostExchangeRejection::SubjectMismatch,
-                ..
-            }) => {
+            Err(SignInError::RevocationRequired(pending)) => {
+                let PendingRevocation { identity, cause, .. } = *pending;
+                assert!(matches!(cause, PostExchangeRejection::SubjectMismatch));
                 assert_eq!(identity.apple_user_id, "apple-user-1");
             }
             other => panic!("expected RevocationRequired, got {other:?}"),

@@ -186,6 +186,30 @@ pub enum PostExchangeRejection {
     SubjectMismatch,
 }
 
+/// A refresh token Apple issued that `sign_in` could not revoke — the caller
+/// must retry [`super::AppleAuthClient::revoke_refresh_token`] with it until it
+/// succeeds (TN3194). Carried by `SignInError::RevocationRequired`; a caller
+/// that cannot revoke immediately stores this to file the pending revocation
+/// against the sign-in attempt that produced it.
+#[derive(Debug, Error)]
+#[error(
+    "sign-in rejected after the authorization code was exchanged, and revoking the refresh token failed — the caller must retry the revocation"
+)]
+pub struct PendingRevocation {
+    pub refresh_token: RefreshToken,
+    /// Comes from the caller's *own* identity token, verified before the
+    /// exchange, and is carried so a retry that outlives the original call can
+    /// be filed against the sign-in attempt that produced it (`apple_user_id`
+    /// is the JWT `sub`). Note it names the user who attempted the sign-in,
+    /// not necessarily the one Apple considers the token's owner: under
+    /// `PostExchangeRejection::SubjectMismatch` the exchanged `id_token` named
+    /// a different user, which is precisely why the sign-in was rejected.
+    pub identity: AppleIdentity,
+    pub cause: PostExchangeRejection,
+    #[source]
+    pub revocation_error: TokenRevocationError,
+}
+
 /// Error from `AppleAuthClient::sign_in`/`sign_in_with_nonce`.
 #[non_exhaustive]
 #[derive(Debug, Error)]
@@ -213,27 +237,10 @@ pub enum SignInError {
         cause: PostExchangeRejection,
     },
     /// Rejected after the exchange, **and the revocation also failed**: the
-    /// refresh token stays live at Apple. The caller must retry
-    /// [`super::AppleAuthClient::revoke_refresh_token`] with this token until it
-    /// succeeds (TN3194) — this is the last place it can reach the token.
-    ///
-    /// `identity` comes from the caller's *own* identity token, verified before
-    /// the exchange, and is carried so a retry that outlives this call can be
-    /// filed against the sign-in attempt that produced it (`apple_user_id` is
-    /// the JWT `sub`). Note it names the user who attempted the sign-in, not
-    /// necessarily the one Apple considers the token's owner: under
-    /// `PostExchangeRejection::SubjectMismatch` the exchanged `id_token` named a
-    /// different user, which is precisely why the sign-in was rejected.
-    #[error(
-        "sign-in rejected after the authorization code was exchanged, and revoking the refresh token failed — the caller must retry the revocation"
-    )]
-    RevocationRequired {
-        refresh_token: RefreshToken,
-        identity: AppleIdentity,
-        cause: PostExchangeRejection,
-        #[source]
-        revocation_error: TokenRevocationError,
-    },
+    /// refresh token stays live at Apple. See [`PendingRevocation`] for the
+    /// retry obligation this carries.
+    #[error(transparent)]
+    RevocationRequired(Box<PendingRevocation>),
 }
 
 #[cfg(test)]
