@@ -271,17 +271,20 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// `RejectedAfterExchange` on success, `RevocationRequired` (carrying the
     /// token and the verified identity) on failure. See docs/architecture.md
     /// for why one attempt and why two variants.
-    pub async fn sign_in<F>(
+    // See docs/architecture.md: "Why sign_in's nonce checker is
+    // `Fn(Option<String>) -> Fut`, not `AsyncFn`".
+    pub async fn sign_in<F, Fut>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         nonce_checker: F,
     ) -> Result<AppleSignIn, SignInError>
     where
-        F: AsyncFn(Option<&str>) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>,
+        F: Fn(Option<String>) -> Fut,
+        Fut: Future<Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>> + Send,
     {
         let verified = self.verify_identity_token(identity_token).await?;
-        match nonce_checker(verified.nonce.as_deref()).await {
+        match nonce_checker(verified.nonce.clone()).await {
             Ok(true) => {}
             Ok(false) => return Err(SignInError::NonceMismatch),
             Err(cause) => return Err(SignInError::NonceCheckFailed(cause)),
@@ -307,7 +310,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         // A failed lookup here still leaves a live token behind, so it's treated the
         // same as an outright mismatch — both must revoke — rather than surfacing a
         // separate `NonceCheckFailed` the way the pre-exchange check does.
-        let nonce_ok = nonce_checker(details.nonce.as_deref()).await.unwrap_or(false);
+        let nonce_ok = nonce_checker(details.nonce.clone()).await.unwrap_or(false);
         if !nonce_ok {
             return Err(self
                 .fail_after_exchange(
@@ -495,9 +498,11 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     /// per `NoncePolicy`):
     ///
     /// ```ignore
-    /// client.sign_in(identity_token, code, async |candidate| match candidate {
-    ///     Some(nonce) => Ok(nonce == expected_nonce),
-    ///     None => Ok(my_replay_store.check_and_record(identity_token).await),
+    /// client.sign_in(identity_token, code, |candidate| async move {
+    ///     match candidate {
+    ///         Some(nonce) => Ok(nonce == expected_nonce),
+    ///         None => Ok(my_replay_store.check_and_record(identity_token).await),
+    ///     }
     /// }).await
     /// ```
     pub async fn sign_in_with_nonce(
@@ -506,8 +511,8 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
         authorization_code: &str,
         expected_nonce: &str,
     ) -> Result<AppleSignIn, SignInError> {
-        self.sign_in(identity_token, authorization_code, async |candidate| {
-            Ok(nonce_eq(candidate, expected_nonce))
+        self.sign_in(identity_token, authorization_code, move |candidate| async move {
+            Ok(nonce_eq(candidate.as_deref(), expected_nonce))
         })
         .await
     }
@@ -898,6 +903,39 @@ mod tests {
         (client, identity_token, transport)
     }
 
+    fn assert_send<T: Send>(_: T) {}
+
+    /// `Send`-bound callers (e.g. axum handlers) need these futures to be `Send`.
+    /// Nothing here is awaited, so `client_for_sign_in`'s arguments don't matter.
+    #[test]
+    fn verification_and_exchange_futures_are_send() {
+        let (client, identity_token, _transport) = client_for_sign_in("nonce", "apple-user-1");
+        assert_send(client.verify_identity_token(&identity_token));
+        assert_send(client.exchange_authorization_code("auth-code"));
+        assert_send(client.revoke_refresh_token("refresh-token"));
+    }
+
+    /// Guards that `sign_in_with_nonce`'s future stays `Send`, as required by
+    /// `Send`-bound callers such as axum handlers.
+    #[test]
+    fn sign_in_with_nonce_future_is_send() {
+        let (client, identity_token, _transport) = client_for_sign_in("nonce", "apple-user-1");
+        assert_send(client.sign_in_with_nonce(&identity_token, "auth-code", "nonce"));
+    }
+
+    /// Guards that `sign_in`'s future stays `Send` for any checker closure that
+    /// itself returns a `Send` future, as required by `Send`-bound callers such
+    /// as axum handlers.
+    #[test]
+    fn sign_in_future_is_send() {
+        let (client, identity_token, _transport) = client_for_sign_in("nonce", "apple-user-1");
+        let expected = String::from("nonce");
+        assert_send(client.sign_in(&identity_token, "auth-code", move |candidate| {
+            let expected = expected.clone();
+            async move { Ok(candidate.as_deref() == Some(expected.as_str())) }
+        }));
+    }
+
     #[tokio::test]
     async fn sign_in_returns_the_identity_when_both_tokens_verify() {
         let (client, identity_token, transport) =
@@ -1094,8 +1132,10 @@ mod tests {
             client_for_sign_in("expected-nonce", "apple-user-1");
 
         let result = client
-            .sign_in(&identity_token, "auth-code", async |_candidate| {
-                Err("session store unavailable".into())
+            .sign_in(&identity_token, "auth-code", |_candidate| async move {
+                Err::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                    "session store unavailable".into(),
+                )
             })
             .await;
 
