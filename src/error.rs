@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// Error verifying an Apple identity token — returned by
 /// `AppleAuthClient::verify_identity_token`, and embedded in
-/// `SignInError::ExchangedTokenUnverified` when it's the `id_token` from a
+/// `CodeExchangeError::ExchangedTokenUnverified` when it's the `id_token` from a
 /// token exchange that fails verification instead.
 #[non_exhaustive]
 #[derive(Debug, Error)]
@@ -117,7 +117,7 @@ pub struct ClientSecretError(#[from] jsonwebtoken::errors::Error);
 
 /// Error from `AppleAuthClient::exchange_authorization_code`'s call to
 /// Apple's token endpoint — the exchange itself; a verification failure of
-/// the resulting `id_token` is `SignInError::ExchangedTokenUnverified`
+/// the resulting `id_token` is `CodeExchangeError::ExchangedTokenUnverified`
 /// instead.
 #[non_exhaustive]
 #[derive(Debug, Error)]

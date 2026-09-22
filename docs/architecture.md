@@ -153,15 +153,14 @@ failure that flows through `jsonwebtoken::decode`'s existing JSON-error path and
 `InvalidTokenCause::Rejected` — the same failure mode a missing `iat`/`aud` already produces, with no
 new error variant needed.
 
-`real_user_status` (`ASUserDetectionStatus`) is modeled as an enum with `Unsupported`/`Unknown`/
-`LikelyReal` plus a catch-all `Other(i64)`, rather than a strict enum or a raw integer. Apple
-documents the claim as absent for web-based apps and pre-iOS-14/macOS-11 clients, which
-`Other`/`Unsupported` already models without a separate `Option` wrapper (absence maps to
-`Unsupported`, since idunn can't distinguish "this client doesn't support the signal" from "Apple
-sent 0"). `Other(i64)` exists so that a future additive value Apple introduces is preserved instead
-of failing verification outright — deserializing the claim as `i64` (not `u8`) keeps that fallback
-total, since a strict-width integer would itself reject an out-of-range value before the `Other` arm
-ever ran.
+`real_user_status` (`ASUserDetectionStatus`) is modeled as `Option<RealUserStatus>`, an enum with
+`Unsupported`/`Unknown`/`LikelyReal`, rather than a strict enum or a raw integer. `None` is Apple
+"didn't tell us this time" — it covers both an absent claim (the signal isn't sent for web-based apps
+or below iOS 14 / macOS 11) and a value idunn doesn't recognize. Folding an unrecognized value into
+`None` rather than preserving it follows the same reasoning `AppleIdentity::real_user_status`'s own
+doc gives for absence: an unrecognized fraud signal can't be interpreted, so the conservative read is
+to treat it the same as no signal at all, rather than surface a value callers might mistake for one
+of the three Apple currently documents.
 
 ## Why coverage excludes test modules (and needs nightly)
 

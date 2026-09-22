@@ -74,8 +74,8 @@ impl std::fmt::Debug for AppleTokenConfig {
 ///
 /// Wrapped rather than a bare `String` so it can't print live credential
 /// material through a derived `Debug` wherever it ends up — both
-/// `VerifiedAuthorization::refresh_token` (a success value that might still be
-/// logged) and `SignInError::ExchangedTokenUnverified` (an error, which gets
+/// `SignInDetails::refresh_token` (a success value that might still be
+/// logged) and `CodeExchangeError::ExchangedTokenUnverified` (an error, which gets
 /// `{:?}`-printed into logs, `anyhow` chains and `unwrap()` panic messages by
 /// convention). Deliberately has no `Display` impl either, for the same
 /// reason. Reach for the value explicitly through `as_str`/`into_inner`.
