@@ -7,6 +7,37 @@ persisted refresh tokens, in-flight sign-ins, pending revocations — is the
 host's responsibility. For the design rationale behind these boundaries, see
 docs/architecture.md.
 
+## Constructing a client
+
+Every constructor (`AppleAuthClient::new`, `with_transport`,
+`with_nonce_requirement`) returns an `AppleSeed`, not a usable client: pick a
+JWKS refresh strategy to get an `AppleAuthClient`. See docs/architecture.md,
+"Why the JWKS refresh strategy is chosen at construction", for why.
+
+With the `tokio-refresh` feature, spawn onto a `Handle`:
+
+```ignore
+let client = AppleAuthClient::new(token_config)?
+    .with_background_refresh(tokio::runtime::Handle::current());
+```
+
+On any other executor, drive the returned future yourself:
+
+```ignore
+let (client, refresh) = AppleAuthClient::new(token_config)?
+    .with_refresh_loop(smol::Timer::after);
+smol::spawn(refresh).detach();
+```
+
+To opt out entirely — JWKS keys are then fetched lazily inside verification,
+with the cold-cache fetch and every subsequent refresh paid by whichever
+request triggers it, unless you drive `AppleAuthClient::refresh_keystore`
+yourself:
+
+```ignore
+let client = AppleAuthClient::new(token_config)?.without_background_refresh();
+```
+
 ## Signing in: `sign_up_or_log_in`
 
 Each call runs, in order: verify the identity token, call `nonce_checker`,

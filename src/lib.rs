@@ -197,17 +197,17 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         token_config: AppleTokenConfig,
         config: VerificationConfig,
         transport: T,
-    ) -> Result<Self, InvalidPrivateKeyError> {
-        Self::build(token_config, config, transport)
+    ) -> Result<AppleSeed<T, N>, InvalidPrivateKeyError> {
+        Self::build(token_config, config, transport).map(|client| AppleSeed { client })
     }
 
     /// Returns how long the caller should wait before calling again — see
     /// `JwksStore::refresh_keystore` for what that duration means and when a
     /// call is skipped for arriving too early.
     ///
-    /// Most callers don't need to drive this by hand: `keystore_refresh_loop`
-    /// (or, with the `tokio-refresh` feature, `with_background_refresh`) does
-    /// it automatically.
+    /// Most callers don't need to drive this by hand:
+    /// `AppleSeed::with_refresh_loop` (or, with the `tokio-refresh` feature,
+    /// `AppleSeed::with_background_refresh`) does it automatically.
     pub async fn refresh_keystore(&self) -> std::time::Duration {
         self.identity_verification.refresh_keystore().await
     }
@@ -221,20 +221,6 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// configured `VerificationConfig` would otherwise suggest less — see
     /// `MIN_REFRESH_DELAY`.
     ///
-    /// `idunn` has no runtime dependency of its own: `sleep` is how the
-    /// caller supplies its own timer (e.g. `tokio::time::sleep`, or an
-    /// `async-io`/`smol` equivalent) without idunn depending on any one
-    /// runtime. See docs/architecture.md ("Why background refresh is opt-in
-    /// and takes a `Handle`") for the `tokio-refresh` feature, a thin
-    /// convenience layer built on top of this method.
-    ///
-    /// The returned future holds only a `Weak` reference to this client's
-    /// shared state, not a strong one: it does not keep the client alive, and
-    /// it exits (at the latest, on its next tick) once every clone of this
-    /// `AppleAuthClient` has been dropped. This is what makes it safe to
-    /// spawn onto an executor and forget — the task cannot outlive the client
-    /// and keep polling Apple forever.
-    ///
     /// The `use<T, N, S, Fut>` is load-bearing, not decorative: edition 2024
     /// return-position `impl Trait` captures every type/lifetime parameter in
     /// scope by default, including `&self`'s anonymous lifetime. Without
@@ -246,7 +232,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// whole point of writing it out explicitly instead of just adding
     /// `+ 'static`, which would conflict with the implicitly-captured
     /// `&self` lifetime instead of removing it.
-    pub fn keystore_refresh_loop<S, Fut>(
+    fn keystore_refresh_loop<S, Fut>(
         &self,
         sleep: S,
     ) -> impl Future<Output = ()> + Send + use<T, N, S, Fut>
@@ -483,17 +469,118 @@ fn revocation_required(
     }))
 }
 
-/// Background JWKS-refresh convenience built on `keystore_refresh_loop`. See
-/// docs/architecture.md ("Why background refresh is opt-in and takes a
-/// `Handle`") for why this takes a `Handle` rather than spawning from inside
-/// a constructor, and why it's gated behind the `tokio-refresh` feature
-/// rather than being unconditional. (`N: NonceRequirement` already implies
-/// `N: 'static`, which `handle.spawn` needs — see `NonceRequirement`'s doc in
-/// `config.rs`.)
+/// Constructs a `NoncePolicy::Strict` client — `AppleAuthClient`'s default `N`
+/// — so `with_transport`/`new` need no type annotation. The only impl naming
+/// `with_transport`/`new`: a second impl under those names, pinned to a
+/// different `N`, would make an unannotated call ambiguous. A `Permissive`
+/// client is built with `with_nonce_requirement` instead.
+impl<T: HttpTransport> AppleAuthClient<T, Strict> {
+    pub fn with_transport(
+        token_config: AppleTokenConfig,
+        config: VerificationConfig,
+        transport: T,
+    ) -> Result<AppleSeed<T, Strict>, InvalidPrivateKeyError> {
+        Self::build(token_config, config, transport).map(|client| AppleSeed { client })
+    }
+}
+
+#[cfg(feature = "reqwest")]
+impl AppleAuthClient<transport::ReqwestTransport, Strict> {
+    #[expect(
+        clippy::new_ret_no_self,
+        reason = "new() hands back an AppleSeed so the refresh strategy must be chosen before use"
+    )]
+    pub fn new(
+        token_config: AppleTokenConfig,
+    ) -> Result<AppleSeed<transport::ReqwestTransport, Strict>, InvalidPrivateKeyError> {
+        Self::with_transport(
+            token_config,
+            VerificationConfig::default(),
+            transport::ReqwestTransport::default(),
+        )
+    }
+}
+
+/// An `AppleAuthClient` that has been built but not yet given a JWKS refresh
+/// strategy: it exposes none of `verify_identity_token`,
+/// `sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`,
+/// `exchange_authorization_code`, `revoke_refresh_token` or
+/// `refresh_keystore`, so it cannot be used before one is chosen. Call
+/// `AppleSeed::with_background_refresh` (`tokio-refresh` feature),
+/// [`AppleSeed::with_refresh_loop`], or — as an explicit, greppable opt-out —
+/// [`AppleSeed::without_background_refresh`] to get an `AppleAuthClient`.
+///
+/// Named after the apples that keep the gods young in Norse myth (see
+/// README, "Why \"idunn\"?"): a seed has to be planted before it grows into
+/// a client. See docs/architecture.md, "Why the JWKS refresh strategy is
+/// chosen at construction".
+#[must_use = "an AppleSeed becomes an AppleAuthClient only via with_background_refresh, with_refresh_loop or without_background_refresh"]
+pub struct AppleSeed<T: HttpTransport, N: NonceRequirement = Strict> {
+    client: AppleAuthClient<T, N>,
+}
+
+impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
+    /// Returns an `AppleAuthClient` paired with a future that keeps its JWKS
+    /// cache warm by calling `refresh_keystore()` in a loop, sleeping between
+    /// calls with the caller-supplied `sleep`. The first tick runs
+    /// immediately, before any sleep: awaiting or spawning the future warms
+    /// a cold cache right away, so the first verification never pays the
+    /// fetch latency itself. The loop never sleeps for less than one second,
+    /// even if the configured `VerificationConfig` would otherwise suggest
+    /// less — see `MIN_REFRESH_DELAY`.
+    ///
+    /// `idunn` has no runtime dependency of its own: `sleep` is how the
+    /// caller supplies its own timer (e.g. `tokio::time::sleep`, or an
+    /// `async-io`/`smol` equivalent) without idunn depending on any one
+    /// runtime. See docs/architecture.md ("Why the JWKS refresh strategy is
+    /// chosen at construction") for `with_background_refresh`, a thin
+    /// `tokio-refresh`-gated convenience layer built on top of this method.
+    ///
+    /// The returned future holds only a `Weak` reference to the returned
+    /// client's shared state. It does not keep the client alive, and it
+    /// exits (at the latest, on its next tick) once every clone of the
+    /// client has been dropped. This is what makes it safe to spawn onto an
+    /// executor and forget — the task cannot outlive the client and keep
+    /// polling Apple forever.
+    ///
+    /// ```ignore
+    /// let (client, refresh) = AppleAuthClient::new(token_config)?
+    ///     .with_refresh_loop(smol::Timer::after);
+    /// smol::spawn(refresh).detach();
+    /// ```
+    #[must_use = "the returned future must be spawned or awaited, or the JWKS cache is never kept warm"]
+    pub fn with_refresh_loop<S, Fut>(
+        self,
+        sleep: S,
+    ) -> (AppleAuthClient<T, N>, impl Future<Output = ()> + Send + use<T, N, S, Fut>)
+    where
+        S: Fn(Duration) -> Fut + Send + 'static,
+        Fut: Future + Send,
+    {
+        let refresh = self.client.keystore_refresh_loop(sleep);
+        (self.client, refresh)
+    }
+
+    /// Explicit opt-out: no background refresh is started. JWKS keys are
+    /// then fetched lazily inside verification — the cold-cache fetch, and
+    /// every subsequent `refresh_interval`, are paid by whichever request
+    /// happens to trigger them — unless the caller drives
+    /// `AppleAuthClient::refresh_keystore` on its own schedule.
+    pub fn without_background_refresh(self) -> AppleAuthClient<T, N> {
+        self.client
+    }
+}
+
+/// Background JWKS-refresh convenience built on `AppleSeed::with_refresh_loop`.
+/// See docs/architecture.md ("Why the JWKS refresh strategy is chosen at
+/// construction") for why this takes a `Handle` as an explicit parameter,
+/// and why it sits behind the optional `tokio-refresh` feature. (`N:
+/// NonceRequirement` already implies `N: 'static`, which `handle.spawn`
+/// needs — see `NonceRequirement`'s doc in `config.rs`.)
 #[cfg(feature = "tokio-refresh")]
-impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
+impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// Spawns a background task that keeps the JWKS cache warm for as long as
-    /// any clone of this client is alive, then returns `self` unchanged so
+    /// any clone of the returned client is alive, then returns the client so
     /// this can be chained straight onto a constructor:
     ///
     /// ```ignore
@@ -506,36 +593,11 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// this already; a hand-built `tokio::runtime::Builder` needs an explicit
     /// `.enable_time()` (or `.enable_all()`), or the spawned task panics the
     /// first time it calls `tokio::time::sleep`.
-    #[must_use = "with_background_refresh returns `self` for chaining; dropping the result discards the client"]
-    pub fn with_background_refresh(self, handle: tokio::runtime::Handle) -> Self {
-        handle.spawn(self.keystore_refresh_loop(tokio::time::sleep));
-        self
-    }
-}
-
-/// Constructs a `NoncePolicy::Strict` client — `AppleAuthClient`'s default `N`
-/// — so `with_transport`/`new` need no type annotation. The only impl naming
-/// `with_transport`/`new`: a second impl under those names, pinned to a
-/// different `N`, would make an unannotated call ambiguous. A `Permissive`
-/// client is built with `with_nonce_requirement` instead.
-impl<T: HttpTransport> AppleAuthClient<T, Strict> {
-    pub fn with_transport(
-        token_config: AppleTokenConfig,
-        config: VerificationConfig,
-        transport: T,
-    ) -> Result<Self, InvalidPrivateKeyError> {
-        Self::build(token_config, config, transport)
-    }
-}
-
-#[cfg(feature = "reqwest")]
-impl AppleAuthClient<transport::ReqwestTransport, Strict> {
-    pub fn new(token_config: AppleTokenConfig) -> Result<Self, InvalidPrivateKeyError> {
-        Self::with_transport(
-            token_config,
-            VerificationConfig::default(),
-            transport::ReqwestTransport::default(),
-        )
+    #[must_use = "with_background_refresh returns the client for chaining; dropping the result discards it"]
+    pub fn with_background_refresh(self, handle: tokio::runtime::Handle) -> AppleAuthClient<T, N> {
+        let (client, refresh) = self.with_refresh_loop(tokio::time::sleep);
+        handle.spawn(refresh);
+        client
     }
 }
 
@@ -685,7 +747,8 @@ mod tests {
             VerificationConfig::default(),
             transport.clone(),
         )
-        .expect("valid test key should construct client");
+        .expect("valid test key should construct client")
+        .without_background_refresh();
 
         client.refresh_keystore().await;
         client.clone().refresh_keystore().await;
@@ -782,7 +845,8 @@ mod tests {
             VerificationConfig::default(),
             transport,
         )
-        .expect("valid test key should construct client");
+        .expect("valid test key should construct client")
+        .without_background_refresh();
 
         let IdentityWithPendingNonce { nonce, identity } =
             client.verify_identity_token(&token).await.unwrap();
@@ -813,7 +877,8 @@ mod tests {
             VerificationConfig::default(),
             transport,
         )
-        .expect("valid test key should construct client");
+        .expect("valid test key should construct client")
+        .without_background_refresh();
 
         let result = client.verify_identity_token(&token).await;
 
@@ -840,7 +905,8 @@ mod tests {
             VerificationConfig::default(),
             transport.clone(),
         )
-        .expect("valid test key should construct client");
+        .expect("valid test key should construct client")
+        .without_background_refresh();
 
         let response = client
             .exchange_authorization_code("auth-code")
@@ -881,7 +947,8 @@ mod tests {
             VerificationConfig::default(),
             transport,
         )
-        .expect("valid test key should construct client");
+        .expect("valid test key should construct client")
+        .without_background_refresh();
 
         let result = client.exchange_authorization_code("auth-code").await;
 
@@ -905,7 +972,8 @@ mod tests {
             VerificationConfig::default(),
             transport.clone(),
         )
-        .expect("valid test key should construct client");
+        .expect("valid test key should construct client")
+        .without_background_refresh();
 
         let result = client.revoke_refresh_token("refresh-token").await;
 
@@ -952,7 +1020,8 @@ mod tests {
             ),
         );
         let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
-            .expect("valid test key should construct client");
+            .expect("valid test key should construct client")
+            .without_background_refresh();
         (client, identity_token, transport)
     }
 
@@ -990,7 +1059,8 @@ mod tests {
             VerificationConfig::default(),
             transport.clone(),
         )
-        .expect("valid test key should construct client");
+        .expect("valid test key should construct client")
+        .without_background_refresh();
         (client, identity_token, transport)
     }
 
@@ -1202,7 +1272,8 @@ mod tests {
             r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
         );
         let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
-            .expect("valid test key should construct client");
+            .expect("valid test key should construct client")
+            .without_background_refresh();
 
         let result = client
             .sign_up_or_log_in_with_nonce(
@@ -1442,7 +1513,8 @@ mod tests {
                 VerificationConfig::default(),
                 transport.clone(),
             )
-            .expect("valid test key should construct client");
+            .expect("valid test key should construct client")
+            .without_background_refresh();
 
             // A sleep that never resolves: proves the fetch that produced
             // `get_calls() == 1` happened *before* the loop ever reached its
@@ -1468,7 +1540,8 @@ mod tests {
                 config,
                 transport.clone(),
             )
-            .expect("valid test key should construct client");
+            .expect("valid test key should construct client")
+            .without_background_refresh();
 
             let recorded = Arc::new(StdMutex::new(Vec::new()));
             recording_loop(client, 5, recorded.clone()).await;
@@ -1496,7 +1569,8 @@ mod tests {
                 config,
                 transport.clone(),
             )
-            .expect("valid test key should construct client");
+            .expect("valid test key should construct client")
+            .without_background_refresh();
 
             // With refresh_interval and cooldown_period both zero, every tick
             // refetches (no early-return, no cooldown skip) — without the
@@ -1531,7 +1605,8 @@ mod tests {
                 config,
                 transport.clone(),
             )
-            .expect("valid test key should construct client");
+            .expect("valid test key should construct client")
+            .without_background_refresh();
 
             // Real tokio::time::sleep and real time throughout: this test is
             // measuring that the task actually stops running, which a fake,
@@ -1560,6 +1635,65 @@ mod tests {
                 1,
                 "task kept fetching after every client clone was dropped"
             );
+        }
+
+        #[tokio::test]
+        async fn with_refresh_loop_returns_a_future_that_warms_the_cache() {
+            let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+            let seed = AppleAuthClient::with_transport(
+                test_token_config(),
+                VerificationConfig::default(),
+                transport.clone(),
+            )
+            .expect("valid test key should construct client");
+
+            let (_client, refresh) =
+                seed.with_refresh_loop(|_: Duration| std::future::pending::<()>());
+            let task = tokio::spawn(refresh);
+
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+
+            assert_eq!(transport.get_calls(), 1);
+            task.abort();
+        }
+
+        #[tokio::test]
+        async fn with_background_refresh_spawns_a_loop_that_warms_the_cache() {
+            let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+            let seed = AppleAuthClient::with_transport(
+                test_token_config(),
+                VerificationConfig::default(),
+                transport.clone(),
+            )
+            .expect("valid test key should construct client");
+
+            let _client = seed.with_background_refresh(tokio::runtime::Handle::current());
+
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+
+            assert_eq!(transport.get_calls(), 1);
+        }
+
+        #[tokio::test]
+        async fn without_background_refresh_fetches_nothing_up_front() {
+            let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
+            let _client = AppleAuthClient::with_transport(
+                test_token_config(),
+                VerificationConfig::default(),
+                transport.clone(),
+            )
+            .expect("valid test key should construct client")
+            .without_background_refresh();
+
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+
+            assert_eq!(transport.get_calls(), 0);
         }
     }
 }

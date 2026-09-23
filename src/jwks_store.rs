@@ -63,7 +63,7 @@ impl<T: HttpGet> JwksStore<T> {
         // brief refresh outage can't stall logins whose kid we already hold.
         // Callers that want the snapshot kept warmer can drive
         // `refresh_keystore()` on their own schedule, or let
-        // `AppleAuthClient::keystore_refresh_loop`/`with_background_refresh`
+        // `AppleSeed::with_refresh_loop`/`with_background_refresh`
         // (src/lib.rs) do it automatically.
         if !self.past_grace_period()
             && !self.snapshot_past_max_age()

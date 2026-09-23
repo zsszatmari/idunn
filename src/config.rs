@@ -43,7 +43,7 @@ mod sealed {
 /// marker types with no lifetime parameter of their own, so this adds no real
 /// restriction, but it means every `N: NonceRequirement` bound elsewhere in
 /// the crate gets `N: 'static` for free — most usefully for
-/// `AppleAuthClient::with_background_refresh` (`src/lib.rs`, behind the
+/// `AppleSeed::with_background_refresh` (`src/lib.rs`, behind the
 /// `tokio-refresh` feature), which spawns a future generic over `N` and so
 /// needs it to be `'static` for `tokio::spawn`/`Handle::spawn`.
 pub trait NonceRequirement: sealed::Sealed + 'static {
