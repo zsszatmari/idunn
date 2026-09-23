@@ -166,8 +166,8 @@ pub enum CodeExchangeError {
     },
 }
 
-/// Why `AppleAuthClient::sign_in` rejected a sign-in *after* the authorization
-/// code was already exchanged for a live refresh token — see
+/// Why `AppleAuthClient::sign_up_or_log_in` rejected a sign-in *after* the
+/// authorization code was already exchanged for a live refresh token — see
 /// `SignInError::RejectedAfterExchange`/`RevocationRequired`.
 #[non_exhaustive]
 #[derive(Debug, Error)]
@@ -186,11 +186,11 @@ pub enum PostExchangeRejection {
     SubjectMismatch,
 }
 
-/// A refresh token Apple issued that `sign_in` could not revoke — the caller
-/// must retry [`super::AppleAuthClient::revoke_refresh_token`] with it until it
-/// succeeds (TN3194). Carried by `SignInError::RevocationRequired`; a caller
-/// that cannot revoke immediately stores this to file the pending revocation
-/// against the sign-in attempt that produced it.
+/// A refresh token Apple issued that `sign_up_or_log_in` could not revoke —
+/// the caller must retry [`super::AppleAuthClient::revoke_refresh_token`] with
+/// it until it succeeds (TN3194). Carried by `SignInError::RevocationRequired`;
+/// a caller that cannot revoke immediately stores this to file the pending
+/// revocation against the sign-in attempt that produced it.
 #[derive(Debug, Error)]
 #[error(
     "sign-in rejected after the authorization code was exchanged, and revoking the refresh token failed — the caller must retry the revocation"
@@ -210,7 +210,7 @@ pub struct PendingRevocation {
     pub revocation_error: TokenRevocationError,
 }
 
-/// Error from `AppleAuthClient::sign_in`/`sign_in_with_nonce`.
+/// Error from `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`.
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum SignInError {
@@ -223,6 +223,11 @@ pub enum SignInError {
     /// lookup failed). This does *not* mean the nonce was wrong.
     #[error("the nonce check could not be completed: {0}")]
     NonceCheckFailed(Box<dyn std::error::Error + Send + Sync>),
+    /// The caller's `account_lookup` failed (e.g. a database error). Says nothing
+    /// about whether the account exists — a genuine lookup failure, not a
+    /// negative result.
+    #[error("the account lookup could not be completed: {0}")]
+    AccountLookupFailed(Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
     Exchange(#[from] TokenExchangeError),
 

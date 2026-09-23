@@ -48,8 +48,9 @@ const MIN_REFRESH_DELAY: Duration = Duration::from_secs(1);
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
 /// that hex-encode in upper case, constant time protects a server-side-secret
 /// `expected_nonce` from a timing side channel — see docs/architecture.md for
-/// the limits of that protection. Used only by `sign_in_with_nonce`; the
-/// `sign_in` callback path compares inside the caller's own closure.
+/// the limits of that protection. Used only by `sign_up_or_log_in_with_nonce`;
+/// the `sign_up_or_log_in` callback path compares inside the caller's own
+/// closure.
 fn nonce_eq(candidate: Option<&str>, expected: &str) -> bool {
     let Some(candidate) = candidate else {
         return false;
@@ -81,19 +82,45 @@ pub struct SignInDetails {
     pub identity: AppleIdentity,
 }
 
-/// A fully checked Apple sign-in: both the identity token and the exchanged
-/// `id_token` were verified, both nonces were matched, and the two tokens are
-/// for the same Apple user. There is deliberately no `nonce` field — unlike
-/// `SignInDetails`, no verification obligation is left on the caller.
-///
-/// Only constructible through `AppleAuthClient::sign_in`/`sign_in_with_nonce`.
+/// What the caller found when looking up this Apple user before spending the
+/// authorization code. `NeedsExchange` covers both a genuinely new user and a
+/// user on file whose stored refresh token is no longer usable — idunn treats
+/// both the same way (exchange the code), so nothing is gained by asking the
+/// caller to distinguish them here. See docs/architecture.md for why a stale
+/// token is discarded rather than revoked.
 #[derive(Debug, Clone)]
-pub struct AppleSignIn {
-    /// Apple's refresh token. Store it: revoking it is how an app satisfies
-    /// Apple's mandatory account-deletion requirement (TN3194).
-    pub refresh_token: RefreshToken,
-    /// The identity from the exchange's `id_token`, already verified.
-    pub identity: AppleIdentity,
+pub enum AccountState {
+    /// No refresh token on file that this sign-in can reuse: exchange the code.
+    NeedsExchange,
+    /// A refresh token already on file for this Apple user is still good:
+    /// skip the exchange, the authorization code stays unspent.
+    AlreadyOnFile,
+}
+
+/// What `sign_up_or_log_in` produced: a login against an already-known
+/// account (no code spent) or a full sign-up (code exchanged for a new
+/// refresh token).
+#[derive(Debug, Clone)]
+pub enum SignInOutcome {
+    LoggedIn {
+        identity: AppleIdentity,
+    },
+    SignedUp {
+        identity: AppleIdentity,
+        refresh_token: RefreshToken,
+    },
+}
+
+impl SignInOutcome {
+    /// The verified identity either way. **Provenance differs by variant:**
+    /// `LoggedIn` carries the identity from the caller's own identity token;
+    /// `SignedUp` carries the identity from the exchanged `id_token`.
+    pub fn identity(&self) -> &AppleIdentity {
+        match self {
+            SignInOutcome::LoggedIn { identity } => identity,
+            SignInOutcome::SignedUp { identity, .. } => identity,
+        }
+    }
 }
 
 /// The credential material for signing client secrets: the config and the
@@ -106,26 +133,19 @@ struct Credentials {
     signing_key: EncodingKey,
 }
 
-///Verifies Apple identity tokens and exchanges authorization codes for refresh
+/// Verifies Apple identity tokens and exchanges authorization codes for refresh
 /// tokens, for a single app identified by `AppleTokenConfig::client_id`.
 ///
 /// One client with one constructor, covering both identity verification and token
 /// exchange even though they touch mostly-disjoint code (see `identity.rs` /
 /// `token.rs`): see docs/architecture.md for why they're bundled together.
-///
-/// `Clone` is cheap — a few atomic increments, with no allocation and no copy of
-/// the Apple private key — and is the intended way to use the client from several
-/// tasks or handlers; wrapping it in an `Arc` yourself is unnecessary. Every clone
-/// shares one JWKS cache **and** one fetch rate limiter. That is deliberate: it is
-/// what keeps concurrent verifications collapsing onto a single request to Apple
-/// rather than one fetch per clone. To get genuinely independent state (e.g. a
-/// second app's `client_id`), construct a new client — cloning will never give you
-/// that. See docs/architecture.md for why the shared state sits behind `Arc`.
+/// Clonable by design.
 ///
 /// `N: NonceRequirement` (default `Strict`) fixes the `NoncePolicy`
-/// identity-token verification enforces, and whether `sign_in_with_nonce`
-/// exists on this client — see [`NonceRequirement`] and docs/architecture.md
-/// ("Why the nonce policy is a type parameter").
+/// identity-token verification enforces, and whether
+/// `sign_up_or_log_in_with_nonce` exists on this client — see
+/// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
+/// type parameter").
 #[derive(Clone)]
 pub struct AppleAuthClient<T: HttpTransport, N: NonceRequirement = Strict> {
     identity_verification: Arc<identity_verification::IdentityVerificationClient<T>>,
@@ -252,43 +272,76 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         }
     }
 
-    /// Verifies an identity token, exchanges an authorization code, and checks
-    /// that both agree on the nonce and the Apple user — the full, safe path
-    /// for a typical Sign in with Apple flow.
+    /// Verifies an identity token, checks the caller's `account_lookup` for
+    /// whether this Apple user already has a usable refresh token on file,
+    /// and either returns a login (no authorization code spent) or exchanges
+    /// the code and checks that both tokens agree on the nonce and the Apple
+    /// user — the full, safe path for a typical Sign in with Apple flow.
     ///
     /// `nonce_checker` gets the token's `nonce` claim verbatim (`None` only
-    /// under `NoncePolicy::Permissive`), called once for `identity_token` and
-    /// once for the exchanged `id_token`. `Ok(false)` is a mismatch; `Err(_)`
-    /// means the check itself failed (e.g. a database lookup), reported as
+    /// under `NoncePolicy::Permissive`), called once for `identity_token` and,
+    /// only when the code is exchanged, once more for the exchanged
+    /// `id_token`. `Ok(false)` is a mismatch; `Err(_)` means the check itself
+    /// failed (e.g. a database lookup), reported as
     /// `SignInError::NonceCheckFailed` rather than a false mismatch.
     ///
-    /// `identity_token` and its nonce are checked first, since exchanging the
-    /// code — unlike verifying a token already in hand — spends the code at
-    /// Apple. A rejection past that point (`PostExchangeRejection`: the
-    /// exchanged `id_token` fails verification, its nonce doesn't match, or it
-    /// names a different Apple user) means a live refresh token now exists, so
-    /// `sign_in` makes one revocation attempt before returning:
+    /// `account_lookup` runs after the identity token and its nonce are
+    /// verified, but before anything is spent at Apple — it decides whether
+    /// `sign_up_or_log_in` exchanges the authorization code at all.
+    /// `AccountState::AlreadyOnFile` returns `SignInOutcome::LoggedIn`
+    /// immediately, leaving the code unspent; `AccountState::NeedsExchange`
+    /// falls through to the exchange. `Err(_)` is
+    /// `SignInError::AccountLookupFailed` — a lookup failure, not a verdict
+    /// that the account doesn't exist.
+    ///
+    /// **Replay caveat for the login branch:** ordinarily, exchanging the
+    /// authorization code is a de-facto single-use check — replaying a
+    /// captured identity token fails because the code can't be spent twice.
+    /// On the `LoggedIn` branch nothing is spent, so `nonce_checker` is the
+    /// *only* replay defense left. For a `Permissive` client whose checker is
+    /// lax, this is a real reduction — `nonce_checker` must be effectively
+    /// single-use for the login branch to stay replay-safe.
+    ///
+    /// A rejection past the exchange (`PostExchangeRejection`: the exchanged
+    /// `id_token` fails verification, its nonce doesn't match, or it names a
+    /// different Apple user) means a live refresh token now exists, so
+    /// `sign_up_or_log_in` makes one revocation attempt before returning:
     /// `RejectedAfterExchange` on success, `RevocationRequired` (carrying a
     /// boxed [`PendingRevocation`] with the token and the verified identity) on
     /// failure. See docs/architecture.md for why one attempt and why two
-    /// variants.
-    // See docs/architecture.md: "Why sign_in's nonce checker is
-    // `Fn(Option<String>) -> Fut`, not `AsyncFn`".
-    pub async fn sign_in<F, Fut>(
+    /// variants — and for why a stale/unusable token reported by
+    /// `account_lookup` is discarded rather than revoked.
+    // See docs/architecture.md: "Why sign_up_or_log_in's nonce checker is
+    // `Fn(Option<String>) -> Fut`, not `AsyncFn`" — `account_lookup` follows
+    // the same reasoning, except it's `FnOnce` since it's called at most once.
+    pub async fn sign_up_or_log_in<F, Fut, L, LFut>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         nonce_checker: F,
-    ) -> Result<AppleSignIn, SignInError>
+        account_lookup: L,
+    ) -> Result<SignInOutcome, SignInError>
     where
         F: Fn(Option<String>) -> Fut,
         Fut: Future<Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>> + Send,
+        L: FnOnce(AppleIdentity) -> LFut,
+        LFut: Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
     {
         let verified = self.verify_identity_token(identity_token).await?;
         match nonce_checker(verified.nonce.clone()).await {
             Ok(true) => {}
             Ok(false) => return Err(SignInError::NonceMismatch),
             Err(cause) => return Err(SignInError::NonceCheckFailed(cause)),
+        }
+
+        match account_lookup(verified.identity.clone()).await {
+            Ok(AccountState::AlreadyOnFile) => {
+                return Ok(SignInOutcome::LoggedIn {
+                    identity: verified.identity,
+                });
+            }
+            Ok(AccountState::NeedsExchange) => {}
+            Err(cause) => return Err(SignInError::AccountLookupFailed(cause)),
         }
 
         let details = match self.exchange_authorization_code(authorization_code).await {
@@ -332,9 +385,9 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
                 .await);
         }
 
-        Ok(AppleSignIn {
-            refresh_token: details.refresh_token,
+        Ok(SignInOutcome::SignedUp {
             identity: details.identity,
+            refresh_token: details.refresh_token,
         })
     }
 
@@ -483,38 +536,46 @@ impl AppleAuthClient<transport::ReqwestTransport, Strict> {
     }
 }
 
-/// `sign_in_with_nonce` exists only here, on a `Strict` client — see
+/// `sign_up_or_log_in_with_nonce` exists only here, on a `Strict` client — see
 /// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
 /// type parameter").
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
-    /// `sign_in` with a checker that compares the claim directly against
-    /// `expected_nonce` — constant-time and ASCII-case-insensitive, see
-    /// `nonce_eq`. A missing nonce (`None`) is a rejection, though under
+    /// `sign_up_or_log_in` with a checker that compares the claim directly
+    /// against `expected_nonce` — constant-time and ASCII-case-insensitive,
+    /// see `nonce_eq`. A missing nonce (`None`) is a rejection, though under
     /// `Strict` that's moot: `verify_identity_token` already rejects a missing
     /// nonce as `IdentityTokenRejected` before the checker runs.
     ///
-    /// A `Permissive` client needs `sign_in` directly, with a checker that
-    /// decides what a missing nonce means for its flow (e.g. a
+    /// A `Permissive` client needs `sign_up_or_log_in` directly, with a
+    /// checker that decides what a missing nonce means for its flow (e.g. a
     /// replay-detection window from `AppleIdentity::issued_at`/`expiration`,
     /// per `NoncePolicy`):
     ///
     /// ```ignore
-    /// client.sign_in(identity_token, code, |candidate| async move {
+    /// client.sign_up_or_log_in(identity_token, code, |candidate| async move {
     ///     match candidate {
     ///         Some(nonce) => Ok(nonce == expected_nonce),
     ///         None => Ok(my_replay_store.check_and_record(identity_token).await),
     ///     }
-    /// }).await
+    /// }, account_lookup).await
     /// ```
-    pub async fn sign_in_with_nonce(
+    pub async fn sign_up_or_log_in_with_nonce<L, LFut>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         expected_nonce: &str,
-    ) -> Result<AppleSignIn, SignInError> {
-        self.sign_in(identity_token, authorization_code, move |candidate| async move {
-            Ok(nonce_eq(candidate.as_deref(), expected_nonce))
-        })
+        account_lookup: L,
+    ) -> Result<SignInOutcome, SignInError>
+    where
+        L: FnOnce(AppleIdentity) -> LFut,
+        LFut: Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
+    {
+        self.sign_up_or_log_in(
+            identity_token,
+            authorization_code,
+            move |candidate| async move { Ok(nonce_eq(candidate.as_deref(), expected_nonce)) },
+            account_lookup,
+        )
         .await
     }
 }
@@ -877,11 +938,11 @@ mod tests {
 
     /// Builds a client and an exchange response whose `id_token` is itself a
     /// freshly signed, valid identity token for `sub` — the shape every
-    /// `sign_in`/`sign_in_with_nonce` test starts from, since it lets each test
-    /// tweak exactly one thing (a nonce, a `sub`) and still get a well-formed
-    /// exchange otherwise. Returns the client, the caller's identity token, and
-    /// the transport (so posts can be inspected).
-    fn client_for_sign_in(
+    /// `sign_up_or_log_in`/`sign_up_or_log_in_with_nonce` test starts from,
+    /// since it lets each test tweak exactly one thing (a nonce, a `sub`) and
+    /// still get a well-formed exchange otherwise. Returns the client, the
+    /// caller's identity token, and the transport (so posts can be inspected).
+    fn client_for_sign_up_or_log_in(
         exchanged_nonce: &str,
         exchanged_sub: &str,
     ) -> (
@@ -904,72 +965,116 @@ mod tests {
         (client, identity_token, transport)
     }
 
+    /// Lookup that always reports no usable account on file, so a test exercises
+    /// the full exchange path — the behaviour the pre-lookup `sign_in` always had.
+    fn needs_exchange()
+    -> impl FnOnce(AppleIdentity) -> std::future::Ready<Result<AccountState, Box<dyn std::error::Error + Send + Sync>>>
+    {
+        // Explicit turbofish needed: nothing else pins the error type here, same
+        // as the existing `Err::<bool, Box<dyn ...>>` annotation further below.
+        |_identity| {
+            std::future::ready(Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                AccountState::NeedsExchange,
+            ))
+        }
+    }
+
     fn assert_send<T: Send>(_: T) {}
 
     /// `Send`-bound callers (e.g. axum handlers) need these futures to be `Send`.
-    /// Nothing here is awaited, so `client_for_sign_in`'s arguments don't matter.
+    /// Nothing here is awaited, so `client_for_sign_up_or_log_in`'s arguments don't matter.
     #[test]
     fn verification_and_exchange_futures_are_send() {
-        let (client, identity_token, _transport) = client_for_sign_in("nonce", "apple-user-1");
+        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
         assert_send(client.verify_identity_token(&identity_token));
         assert_send(client.exchange_authorization_code("auth-code"));
         assert_send(client.revoke_refresh_token("refresh-token"));
     }
 
-    /// Guards that `sign_in_with_nonce`'s future stays `Send`, as required by
-    /// `Send`-bound callers such as axum handlers.
+    /// Guards that `sign_up_or_log_in_with_nonce`'s future stays `Send`, as
+    /// required by `Send`-bound callers such as axum handlers.
     #[test]
-    fn sign_in_with_nonce_future_is_send() {
-        let (client, identity_token, _transport) = client_for_sign_in("nonce", "apple-user-1");
-        assert_send(client.sign_in_with_nonce(&identity_token, "auth-code", "nonce"));
+    fn sign_up_or_log_in_with_nonce_future_is_send() {
+        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
+        assert_send(client.sign_up_or_log_in_with_nonce(
+            &identity_token,
+            "auth-code",
+            "nonce",
+            needs_exchange(),
+        ));
     }
 
-    /// Guards that `sign_in`'s future stays `Send` for any checker closure that
-    /// itself returns a `Send` future, as required by `Send`-bound callers such
-    /// as axum handlers.
+    /// Guards that `sign_up_or_log_in`'s future stays `Send` for any checker
+    /// closure that itself returns a `Send` future, as required by `Send`-bound
+    /// callers such as axum handlers.
     #[test]
-    fn sign_in_future_is_send() {
-        let (client, identity_token, _transport) = client_for_sign_in("nonce", "apple-user-1");
+    fn sign_up_or_log_in_future_is_send() {
+        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
         let expected = String::from("nonce");
-        assert_send(client.sign_in(&identity_token, "auth-code", move |candidate| {
-            let expected = expected.clone();
-            async move { Ok(candidate.as_deref() == Some(expected.as_str())) }
-        }));
+        assert_send(client.sign_up_or_log_in(
+            &identity_token,
+            "auth-code",
+            move |candidate| {
+                let expected = expected.clone();
+                async move { Ok(candidate.as_deref() == Some(expected.as_str())) }
+            },
+            needs_exchange(),
+        ));
     }
 
-    /// `sign_in` returns `Result<_, SignInError>` from every frame on the success
-    /// path too, so the error stays under clippy's 128-byte `result_large_err`
-    /// budget: `RevocationRequired`'s payload is boxed to keep it there.
+    /// `sign_up_or_log_in` returns `Result<_, SignInError>` from every frame on
+    /// the success path too, so the error stays under clippy's 128-byte
+    /// `result_large_err` budget: `RevocationRequired`'s payload is boxed to
+    /// keep it there.
     #[test]
     fn sign_in_error_stays_small() {
         assert!(std::mem::size_of::<SignInError>() <= 128);
     }
 
     #[tokio::test]
-    async fn sign_in_returns_the_identity_when_both_tokens_verify() {
+    async fn sign_up_or_log_in_returns_the_identity_when_both_tokens_verify() {
         let (client, identity_token, transport) =
-            client_for_sign_in("expected-nonce", "apple-user-1");
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
-        let sign_in = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+        let outcome = client
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
             .await
             .unwrap();
 
-        assert_eq!(sign_in.refresh_token.as_str(), "rt");
-        assert_eq!(sign_in.identity.apple_user_id, "apple-user-1");
+        match outcome {
+            SignInOutcome::SignedUp {
+                identity,
+                refresh_token,
+            } => {
+                assert_eq!(refresh_token.as_str(), "rt");
+                assert_eq!(identity.apple_user_id, "apple-user-1");
+            }
+            other => panic!("expected SignedUp, got {other:?}"),
+        }
         assert_eq!(transport.posts().len(), 1);
         assert_eq!(transport.posts()[0].0, "https://appleid.apple.com/auth/token");
     }
 
     /// A mismatched identity-token nonce is rejected before the authorization
-    /// code is ever exchanged — pins that `sign_in` checks the free thing first.
+    /// code is ever exchanged — pins that `sign_up_or_log_in` checks the free
+    /// thing first.
     #[tokio::test]
-    async fn sign_in_rejects_a_mismatched_identity_token_nonce_without_spending_the_code() {
+    async fn sign_up_or_log_in_rejects_a_mismatched_identity_token_nonce_without_spending_the_code() {
         let (client, identity_token, transport) =
-            client_for_sign_in("expected-nonce", "apple-user-1");
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "wrong-nonce")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "wrong-nonce",
+                needs_exchange(),
+            )
             .await;
 
         assert!(matches!(result, Err(SignInError::NonceMismatch)));
@@ -977,7 +1082,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_unverifiable() {
+    async fn sign_up_or_log_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_unverifiable() {
         let config = test_token_config();
         let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
         let transport = FakeAppleTransport::new(
@@ -988,7 +1093,12 @@ mod tests {
             .expect("valid test key should construct client");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
             .await;
 
         assert!(matches!(
@@ -1003,12 +1113,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_in_revokes_the_refresh_token_when_the_exchanged_nonce_does_not_match() {
+    async fn sign_up_or_log_in_revokes_the_refresh_token_when_the_exchanged_nonce_does_not_match() {
         let (client, identity_token, transport) =
-            client_for_sign_in("a-different-nonce", "apple-user-1");
+            client_for_sign_up_or_log_in("a-different-nonce", "apple-user-1");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
             .await;
 
         assert!(matches!(
@@ -1022,16 +1137,21 @@ mod tests {
         assert_eq!(posts[1].0, "https://appleid.apple.com/auth/revoke");
     }
 
-    /// Regression test for the identity-confusion gap this crate's `sign_in`
-    /// closes: pairing one Apple user's identity token with an authorization
-    /// code that resolves to a different Apple user.
+    /// Regression test for the identity-confusion gap this crate's
+    /// `sign_up_or_log_in` closes: pairing one Apple user's identity token
+    /// with an authorization code that resolves to a different Apple user.
     #[tokio::test]
-    async fn sign_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_for_another_user() {
+    async fn sign_up_or_log_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_for_another_user() {
         let (client, identity_token, transport) =
-            client_for_sign_in("expected-nonce", "apple-user-2");
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-2");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
             .await;
 
         assert!(matches!(
@@ -1046,7 +1166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_in_hands_back_the_refresh_token_when_the_revocation_also_fails() {
+    async fn sign_up_or_log_in_hands_back_the_refresh_token_when_the_revocation_also_fails() {
         let config = test_token_config();
         let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
         let transport = FakeAppleTransport::new(
@@ -1058,7 +1178,12 @@ mod tests {
             .expect("valid test key should construct client");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
             .await;
 
         match result {
@@ -1083,7 +1208,7 @@ mod tests {
     /// needs to be filed against.
     #[tokio::test]
     async fn revocation_required_carries_the_callers_identity_not_the_exchanged_one() {
-        let (_, identity_token, transport) = client_for_sign_in("expected-nonce", "apple-user-2");
+        let (_, identity_token, transport) = client_for_sign_up_or_log_in("expected-nonce", "apple-user-2");
         let transport = transport.with_revoke_failing();
         let client = AppleAuthClient::with_transport(
             test_token_config(),
@@ -1093,7 +1218,12 @@ mod tests {
         .expect("valid test key should construct client");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
             .await;
 
         match result {
@@ -1107,10 +1237,11 @@ mod tests {
     }
 
     /// An `invalid_grant` answer from the revoke endpoint means the token is
-    /// already unusable, so `sign_in` must land on `RejectedAfterExchange` —
-    /// nothing left to retry — rather than `RevocationRequired`.
+    /// already unusable, so `sign_up_or_log_in` must land on
+    /// `RejectedAfterExchange` — nothing left to retry — rather than
+    /// `RevocationRequired`.
     #[tokio::test]
-    async fn sign_in_treats_invalid_grant_on_revoke_as_a_successful_revocation() {
+    async fn sign_up_or_log_in_treats_invalid_grant_on_revoke_as_a_successful_revocation() {
         let config = test_token_config();
         let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
         let transport = FakeAppleTransport::new(
@@ -1122,7 +1253,12 @@ mod tests {
             .expect("valid test key should construct client");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "expected-nonce")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
             .await;
 
         assert!(matches!(
@@ -1136,16 +1272,21 @@ mod tests {
     /// A nonce lookup that fails outright (e.g. a database error) must not be
     /// reported the same way as a nonce the caller actually rejected.
     #[tokio::test]
-    async fn sign_in_reports_a_failed_nonce_lookup_separately_from_a_mismatch() {
+    async fn sign_up_or_log_in_reports_a_failed_nonce_lookup_separately_from_a_mismatch() {
         let (client, identity_token, transport) =
-            client_for_sign_in("expected-nonce", "apple-user-1");
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
         let result = client
-            .sign_in(&identity_token, "auth-code", |_candidate| async move {
-                Err::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                    "session store unavailable".into(),
-                )
-            })
+            .sign_up_or_log_in(
+                &identity_token,
+                "auth-code",
+                |_candidate| async move {
+                    Err::<bool, Box<dyn std::error::Error + Send + Sync>>(
+                        "session store unavailable".into(),
+                    )
+                },
+                needs_exchange(),
+            )
             .await;
 
         assert!(matches!(result, Err(SignInError::NonceCheckFailed(_))));
@@ -1153,15 +1294,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_in_with_nonce_matches_case_insensitively() {
+    async fn sign_up_or_log_in_with_nonce_matches_case_insensitively() {
         let (client, identity_token, _transport) =
-            client_for_sign_in("Expected-Nonce", "apple-user-1");
+            client_for_sign_up_or_log_in("Expected-Nonce", "apple-user-1");
 
         let result = client
-            .sign_in_with_nonce(&identity_token, "auth-code", "EXPECTED-NONCE")
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "EXPECTED-NONCE",
+                needs_exchange(),
+            )
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn logs_in_without_spending_the_code_when_the_account_is_already_on_file() {
+        let (client, identity_token, transport) =
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
+
+        let outcome = client
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                |_identity| async move { Ok(AccountState::AlreadyOnFile) },
+            )
+            .await
+            .unwrap();
+
+        match outcome {
+            SignInOutcome::LoggedIn { identity } => {
+                assert_eq!(identity.apple_user_id, "apple-user-1");
+            }
+            other => panic!("expected LoggedIn, got {other:?}"),
+        }
+        assert!(transport.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reports_a_failed_account_lookup_separately() {
+        let (client, identity_token, transport) =
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
+
+        let result = client
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                |_identity| async move {
+                    Err::<AccountState, Box<dyn std::error::Error + Send + Sync>>(
+                        "account store unavailable".into(),
+                    )
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(SignInError::AccountLookupFailed(_))));
+        assert!(transport.posts().is_empty());
     }
 
     /// Tests for `keystore_refresh_loop`. None of these use `tokio::time`'s

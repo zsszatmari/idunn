@@ -32,11 +32,12 @@ mod sealed {
 /// see [`Strict`] and [`Permissive`], the only two implementors. Sealed: cannot be
 /// implemented outside this crate.
 ///
-/// `AppleAuthClient::sign_in_with_nonce` compares a token's `nonce` claim
-/// against one fixed expected value, which a `NoncePolicy::Permissive` token
-/// may legitimately not carry at all. This type parameter makes that method
-/// absent — a compile error, not a runtime one — on a `Permissive` client. See
-/// docs/architecture.md ("Why the nonce policy is a type parameter").
+/// `AppleAuthClient::sign_up_or_log_in_with_nonce` compares a token's `nonce`
+/// claim against one fixed expected value, which a `NoncePolicy::Permissive`
+/// token may legitimately not carry at all. This type parameter makes that
+/// method absent — a compile error, not a runtime one — on a `Permissive`
+/// client. See docs/architecture.md ("Why the nonce policy is a type
+/// parameter").
 ///
 /// Bounded by `'static` on top of `Sealed`: both implementors are zero-sized
 /// marker types with no lifetime parameter of their own, so this adds no real
@@ -62,8 +63,8 @@ pub struct Strict;
 /// Type-level marker selecting [`NoncePolicy::Permissive`]. Distinct from that
 /// enum variant — this is a type, used as `AppleAuthClient`'s second type
 /// parameter, not a value. A client built with this marker has no
-/// `sign_in_with_nonce` method; use `AppleAuthClient::sign_in` with a checker
-/// that decides what a missing nonce means for your flow.
+/// `sign_up_or_log_in_with_nonce` method; use `AppleAuthClient::sign_up_or_log_in`
+/// with a checker that decides what a missing nonce means for your flow.
 #[derive(Clone, Copy, Debug)]
 pub struct Permissive;
 
@@ -84,7 +85,7 @@ impl NonceRequirement for Permissive {
 /// set may get before it is refused outright).
 ///
 /// The nonce-presence policy lives on `AppleAuthClient`'s `N: NonceRequirement`
-/// type parameter (`Strict`/`Permissive`), so `sign_in_with_nonce`'s
+/// type parameter (`Strict`/`Permissive`), so `sign_up_or_log_in_with_nonce`'s
 /// availability tracks it at compile time. See docs/architecture.md ("Why the
 /// nonce policy is a type parameter").
 #[derive(Clone, Copy, Debug)]
