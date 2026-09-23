@@ -302,15 +302,18 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// lax, this is a real reduction — `nonce_checker` must be effectively
     /// single-use for the login branch to stay replay-safe.
     ///
-    /// A rejection past the exchange (`PostExchangeRejection`: the exchanged
-    /// `id_token` fails verification, its nonce doesn't match, or it names a
-    /// different Apple user) means a live refresh token now exists, so
-    /// `sign_up_or_log_in` makes one revocation attempt before returning:
-    /// `RejectedAfterExchange` on success, `RevocationRequired` (carrying a
-    /// boxed [`PendingRevocation`] with the token and the verified identity) on
-    /// failure. See docs/architecture.md for why one attempt and why two
-    /// variants — and for why a stale/unusable token reported by
-    /// `account_lookup` is discarded rather than revoked.
+    /// A post-exchange rejection where the exchanged `id_token` names a
+    /// different Apple user than the caller's identity token returns
+    /// `SignInError::SubjectMismatch`: the token is simply discarded. Every
+    /// other post-exchange rejection (`PostExchangeRejection`: the exchanged
+    /// `id_token` fails verification, or its nonce doesn't match) returns
+    /// `SignInError::RevocationRequired` (carrying a boxed
+    /// [`PendingRevocation`] with the token and the verified identity): the
+    /// host revokes it after this call returns. See docs/architecture.md,
+    /// "Why `sign_up_or_log_in` never revokes, and discards another user's
+    /// token", and "The revocation contract with `account_lookup`" — the
+    /// latter also covers why a stale/unusable token reported by
+    /// `account_lookup` is simply discarded.
     // See docs/architecture.md: "Why sign_up_or_log_in's nonce checker is
     // `Fn(Option<String>) -> Fut`, not `AsyncFn`" — `account_lookup` follows
     // the same reasoning, except it's `FnOnce` since it's called at most once.
@@ -351,64 +354,39 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
                 refresh_token,
                 cause,
             }) => {
-                return Err(self
-                    .fail_after_exchange(
-                        refresh_token,
-                        verified.identity,
-                        PostExchangeRejection::TokenUnverified(cause),
-                    )
-                    .await);
+                return Err(revocation_required(
+                    refresh_token,
+                    verified.identity,
+                    PostExchangeRejection::TokenUnverified(cause),
+                ));
             }
         };
 
-        // A failed lookup here still leaves a live token behind, so it's treated the
-        // same as an outright mismatch — both must revoke — rather than surfacing a
-        // separate `NonceCheckFailed` the way the pre-exchange check does.
-        let nonce_ok = nonce_checker(details.nonce.clone()).await.unwrap_or(false);
-        if !nonce_ok {
-            return Err(self
-                .fail_after_exchange(
-                    details.refresh_token,
-                    verified.identity,
-                    PostExchangeRejection::NonceMismatch,
-                )
-                .await);
+        // Checked before the nonce: a stolen authorization code paired with the
+        // caller's identity token carries the *thief's* own nonce, which would
+        // otherwise be classified as an ordinary `NonceMismatch` and hand a
+        // stranger's token back for revocation. See docs/architecture.md.
+        if details.identity.apple_user_id != verified.identity.apple_user_id {
+            return Err(SignInError::SubjectMismatch);
         }
 
-        if details.identity.apple_user_id != verified.identity.apple_user_id {
-            return Err(self
-                .fail_after_exchange(
-                    details.refresh_token,
-                    verified.identity,
-                    PostExchangeRejection::SubjectMismatch,
-                )
-                .await);
+        // A failed lookup here still leaves a live token behind, exactly like an
+        // outright mismatch, so both are folded into `RevocationRequired` and
+        // the token is handed back for revocation either way — unlike the
+        // pre-exchange check, which surfaces a separate `NonceCheckFailed`.
+        let nonce_ok = nonce_checker(details.nonce.clone()).await.unwrap_or(false);
+        if !nonce_ok {
+            return Err(revocation_required(
+                details.refresh_token,
+                verified.identity,
+                PostExchangeRejection::NonceMismatch,
+            ));
         }
 
         Ok(SignInOutcome::SignedUp {
             identity: details.identity,
             refresh_token: details.refresh_token,
         })
-    }
-
-    /// One revocation attempt for a refresh token that can't be used — the
-    /// exchange already spent the authorization code, so this token is either
-    /// revoked here or handed back to the caller; see `SignInError`.
-    async fn fail_after_exchange(
-        &self,
-        refresh_token: RefreshToken,
-        identity: AppleIdentity,
-        cause: PostExchangeRejection,
-    ) -> SignInError {
-        match self.revoke_refresh_token(refresh_token.as_str()).await {
-            Ok(()) => SignInError::RejectedAfterExchange { cause },
-            Err(revocation_error) => SignInError::RevocationRequired(Box::new(PendingRevocation {
-                refresh_token,
-                identity,
-                cause,
-                revocation_error,
-            })),
-        }
     }
 
     /// Verify and decode an Apple identity JWT: its signature (against Apple's
@@ -478,6 +456,22 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         )
         .await
     }
+}
+
+/// The refresh token is live at Apple and deliberately left unrevoked —
+/// revoking is authorization-scoped and could tear down a concurrent sign-in
+/// for the same Apple user. See docs/architecture.md, "The revocation
+/// contract with `account_lookup`".
+fn revocation_required(
+    refresh_token: RefreshToken,
+    identity: AppleIdentity,
+    cause: PostExchangeRejection,
+) -> SignInError {
+    SignInError::RevocationRequired(Box::new(PendingRevocation {
+        refresh_token,
+        identity,
+        cause,
+    }))
 }
 
 /// Background JWKS-refresh convenience built on `keystore_refresh_loop`. See
@@ -614,17 +608,12 @@ mod tests {
     /// with their URL and body so tests can inspect exactly what was sent).
     /// `Clone` shares `get_calls` and `posts` through their `Arc`s, so calls made
     /// through any clone are observed here.
-    ///
-    /// `post_response` answers every POST except the revoke endpoint when
-    /// `revoke_failure` is set — needed to exercise `SignInError::RevocationRequired`,
-    /// where the exchange must succeed but the following revoke must not.
     #[derive(Clone)]
     struct FakeAppleTransport {
         get_calls: Arc<StdMutex<usize>>,
         posts: Arc<StdMutex<Vec<(String, String)>>>,
         jwks_body: String,
         post_response: String,
-        revoke_failure: Option<(u16, String)>,
     }
 
     impl FakeAppleTransport {
@@ -634,17 +623,7 @@ mod tests {
                 posts: Arc::default(),
                 jwks_body: jwks_body.into(),
                 post_response: post_response.into(),
-                revoke_failure: None,
             }
-        }
-
-        fn with_revoke_failing(self) -> Self {
-            self.with_revoke_failing_with(500, "revocation failed")
-        }
-
-        fn with_revoke_failing_with(mut self, status: u16, body: impl Into<String>) -> Self {
-            self.revoke_failure = Some((status, body.into()));
-            self
         }
 
         fn get_calls(&self) -> usize {
@@ -680,15 +659,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((url.to_string(), body.to_string()));
-            match &self.revoke_failure {
-                Some((status, failure_body)) if url.ends_with("/auth/revoke") => {
-                    Err(TransportError::Http {
-                        status: *status,
-                        body: failure_body.clone(),
-                    })
-                }
-                _ => Ok(self.post_response.clone()),
-            }
+            Ok(self.post_response.clone())
         }
     }
 
@@ -1081,8 +1052,12 @@ mod tests {
         assert!(transport.posts().is_empty());
     }
 
+    /// An unverifiable exchanged `id_token` leaves a live refresh token behind
+    /// that `sign_up_or_log_in` hands straight back — no revoke attempt — for
+    /// the host to revoke after the call returns. See docs/architecture.md,
+    /// "The revocation contract with `account_lookup`".
     #[tokio::test]
-    async fn sign_up_or_log_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_unverifiable() {
+    async fn sign_up_or_log_in_hands_back_an_unverifiable_exchanged_token_without_revoking_it() {
         let config = test_token_config();
         let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
         let transport = FakeAppleTransport::new(
@@ -1090,91 +1065,6 @@ mod tests {
             r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
         );
         let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
-            .expect("valid test key should construct client");
-
-        let result = client
-            .sign_up_or_log_in_with_nonce(
-                &identity_token,
-                "auth-code",
-                "expected-nonce",
-                needs_exchange(),
-            )
-            .await;
-
-        assert!(matches!(
-            result,
-            Err(SignInError::RejectedAfterExchange {
-                cause: PostExchangeRejection::TokenUnverified(_)
-            })
-        ));
-        let posts = transport.posts();
-        assert_eq!(posts.len(), 2);
-        assert_eq!(posts[1].0, "https://appleid.apple.com/auth/revoke");
-    }
-
-    #[tokio::test]
-    async fn sign_up_or_log_in_revokes_the_refresh_token_when_the_exchanged_nonce_does_not_match() {
-        let (client, identity_token, transport) =
-            client_for_sign_up_or_log_in("a-different-nonce", "apple-user-1");
-
-        let result = client
-            .sign_up_or_log_in_with_nonce(
-                &identity_token,
-                "auth-code",
-                "expected-nonce",
-                needs_exchange(),
-            )
-            .await;
-
-        assert!(matches!(
-            result,
-            Err(SignInError::RejectedAfterExchange {
-                cause: PostExchangeRejection::NonceMismatch
-            })
-        ));
-        let posts = transport.posts();
-        assert_eq!(posts.len(), 2);
-        assert_eq!(posts[1].0, "https://appleid.apple.com/auth/revoke");
-    }
-
-    /// Regression test for the identity-confusion gap this crate's
-    /// `sign_up_or_log_in` closes: pairing one Apple user's identity token
-    /// with an authorization code that resolves to a different Apple user.
-    #[tokio::test]
-    async fn sign_up_or_log_in_revokes_the_refresh_token_when_the_exchanged_id_token_is_for_another_user() {
-        let (client, identity_token, transport) =
-            client_for_sign_up_or_log_in("expected-nonce", "apple-user-2");
-
-        let result = client
-            .sign_up_or_log_in_with_nonce(
-                &identity_token,
-                "auth-code",
-                "expected-nonce",
-                needs_exchange(),
-            )
-            .await;
-
-        assert!(matches!(
-            result,
-            Err(SignInError::RejectedAfterExchange {
-                cause: PostExchangeRejection::SubjectMismatch
-            })
-        ));
-        let posts = transport.posts();
-        assert_eq!(posts.len(), 2);
-        assert_eq!(posts[1].0, "https://appleid.apple.com/auth/revoke");
-    }
-
-    #[tokio::test]
-    async fn sign_up_or_log_in_hands_back_the_refresh_token_when_the_revocation_also_fails() {
-        let config = test_token_config();
-        let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
-        let transport = FakeAppleTransport::new(
-            jwks_body_including(TEST_KID),
-            r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
-        )
-        .with_revoke_failing();
-        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport)
             .expect("valid test key should construct client");
 
         let result = client
@@ -1200,57 +1090,15 @@ mod tests {
             }
             other => panic!("expected RevocationRequired, got {other:?}"),
         }
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0, "https://appleid.apple.com/auth/token");
     }
 
-    /// `RevocationRequired::identity` must name the caller's own identity-token
-    /// subject, not the exchanged `id_token`'s — under `SubjectMismatch` those
-    /// two differ by construction, and it's the caller's attempt that a retry
-    /// needs to be filed against.
     #[tokio::test]
-    async fn revocation_required_carries_the_callers_identity_not_the_exchanged_one() {
-        let (_, identity_token, transport) = client_for_sign_up_or_log_in("expected-nonce", "apple-user-2");
-        let transport = transport.with_revoke_failing();
-        let client = AppleAuthClient::with_transport(
-            test_token_config(),
-            VerificationConfig::default(),
-            transport,
-        )
-        .expect("valid test key should construct client");
-
-        let result = client
-            .sign_up_or_log_in_with_nonce(
-                &identity_token,
-                "auth-code",
-                "expected-nonce",
-                needs_exchange(),
-            )
-            .await;
-
-        match result {
-            Err(SignInError::RevocationRequired(pending)) => {
-                let PendingRevocation { identity, cause, .. } = *pending;
-                assert!(matches!(cause, PostExchangeRejection::SubjectMismatch));
-                assert_eq!(identity.apple_user_id, "apple-user-1");
-            }
-            other => panic!("expected RevocationRequired, got {other:?}"),
-        }
-    }
-
-    /// An `invalid_grant` answer from the revoke endpoint means the token is
-    /// already unusable, so `sign_up_or_log_in` must land on
-    /// `RejectedAfterExchange` — nothing left to retry — rather than
-    /// `RevocationRequired`.
-    #[tokio::test]
-    async fn sign_up_or_log_in_treats_invalid_grant_on_revoke_as_a_successful_revocation() {
-        let config = test_token_config();
-        let (identity_token, _, _) = signed_identity_token(&config.client_id, "apple-user-1");
-        let transport = FakeAppleTransport::new(
-            jwks_body_including(TEST_KID),
-            r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
-        )
-        .with_revoke_failing_with(400, r#"{"error":"invalid_grant"}"#);
-        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport)
-            .expect("valid test key should construct client");
+    async fn sign_up_or_log_in_hands_back_the_token_when_the_exchanged_nonce_does_not_match() {
+        let (client, identity_token, transport) =
+            client_for_sign_up_or_log_in("a-different-nonce", "apple-user-1");
 
         let result = client
             .sign_up_or_log_in_with_nonce(
@@ -1263,10 +1111,57 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SignInError::RejectedAfterExchange {
-                cause: PostExchangeRejection::TokenUnverified(_)
-            })
+            Err(SignInError::RevocationRequired(pending))
+                if matches!(pending.cause, PostExchangeRejection::NonceMismatch)
         ));
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0, "https://appleid.apple.com/auth/token");
+    }
+
+    /// Regression test for the identity-confusion gap this crate's
+    /// `sign_up_or_log_in` closes: pairing one Apple user's identity token
+    /// with an authorization code that resolves to a different Apple user.
+    /// The token is simply discarded: see docs/architecture.md, "Why
+    /// `sign_up_or_log_in` never revokes, and discards another user's token".
+    #[tokio::test]
+    async fn sign_up_or_log_in_discards_the_token_when_the_exchanged_id_token_is_for_another_user() {
+        let (client, identity_token, transport) =
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-2");
+
+        let result = client
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(SignInError::SubjectMismatch)));
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0, "https://appleid.apple.com/auth/token");
+    }
+
+    /// A foreign authorization code carries the thief's own nonce, not the
+    /// caller's — pins that the subject check runs before the nonce check, so
+    /// it's always classified as `SubjectMismatch`, never `RevocationRequired`.
+    #[tokio::test]
+    async fn sign_up_or_log_in_checks_the_subject_before_the_exchanged_nonce() {
+        let (client, identity_token, _transport) =
+            client_for_sign_up_or_log_in("a-different-nonce", "apple-user-2");
+
+        let result = client
+            .sign_up_or_log_in_with_nonce(
+                &identity_token,
+                "auth-code",
+                "expected-nonce",
+                needs_exchange(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(SignInError::SubjectMismatch)));
     }
 
     /// A nonce lookup that fails outright (e.g. a database error) must not be

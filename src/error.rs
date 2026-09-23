@@ -167,8 +167,10 @@ pub enum CodeExchangeError {
 }
 
 /// Why `AppleAuthClient::sign_up_or_log_in` rejected a sign-in *after* the
-/// authorization code was already exchanged for a live refresh token — see
-/// `SignInError::RejectedAfterExchange`/`RevocationRequired`.
+/// authorization code was already exchanged for a live refresh token — this
+/// now describes why we rejected the sign-in after an exchange whose token
+/// (to idunn's best knowledge) belongs to the caller's own Apple user; see
+/// `SignInError::RevocationRequired`.
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum PostExchangeRejection {
@@ -179,35 +181,31 @@ pub enum PostExchangeRejection {
     /// The exchanged `id_token`'s nonce doesn't match the expected value.
     #[error("the exchanged id_token's nonce does not match the expected value")]
     NonceMismatch,
-    /// The exchanged `id_token` is for a different Apple user than the caller's
-    /// identity token — someone else's identity token paired with the caller's
-    /// own authorization code.
-    #[error("the exchanged id_token is for a different Apple user than the identity token")]
-    SubjectMismatch,
 }
 
-/// A refresh token Apple issued that `sign_up_or_log_in` could not revoke —
-/// the caller must retry [`super::AppleAuthClient::revoke_refresh_token`] with
-/// it until it succeeds (TN3194). Carried by `SignInError::RevocationRequired`;
-/// a caller that cannot revoke immediately stores this to file the pending
-/// revocation against the sign-in attempt that produced it.
+/// A refresh token Apple issued that `sign_up_or_log_in` deliberately left
+/// unrevoked — see [`super::AppleAuthClient::sign_up_or_log_in`] and
+/// docs/architecture.md, "The revocation contract with `account_lookup`", for
+/// why idunn itself never calls `revoke_refresh_token` here. The revocation is
+/// the host's job, to be run after this call returns — possibly for several
+/// tokens in sequence, coordinated per that contract. Carried by
+/// `SignInError::RevocationRequired`.
 #[derive(Debug, Error)]
 #[error(
-    "sign-in rejected after the authorization code was exchanged, and revoking the refresh token failed — the caller must retry the revocation"
+    "sign-in rejected after the authorization code was exchanged; the refresh token is live and the caller must revoke it"
 )]
 pub struct PendingRevocation {
     pub refresh_token: RefreshToken,
     /// Comes from the caller's *own* identity token, verified before the
-    /// exchange, and is carried so a retry that outlives the original call can
-    /// be filed against the sign-in attempt that produced it (`apple_user_id`
-    /// is the JWT `sub`). Note it names the user who attempted the sign-in,
-    /// not necessarily the one Apple considers the token's owner: under
-    /// `PostExchangeRejection::SubjectMismatch` the exchanged `id_token` named
-    /// a different user, which is precisely why the sign-in was rejected.
+    /// exchange — this is the key (`apple_user_id` is the JWT `sub`) the host
+    /// files the pending revocation against. Under
+    /// `PostExchangeRejection::NonceMismatch`, the exchanged `id_token`
+    /// verified this same subject. Under `PostExchangeRejection::TokenUnverified`,
+    /// the exchanged token's owner could not be verified at all — see
+    /// docs/architecture.md for the residual risk this carries.
     pub identity: AppleIdentity,
-    pub cause: PostExchangeRejection,
     #[source]
-    pub revocation_error: TokenRevocationError,
+    pub cause: PostExchangeRejection,
 }
 
 /// Error from `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`.
@@ -231,19 +229,16 @@ pub enum SignInError {
     #[error(transparent)]
     Exchange(#[from] TokenExchangeError),
 
-    // --- AFTER the exchange: a live refresh token existed ---
-    /// Rejected after the exchange, but the refresh token Apple issued was
-    /// successfully revoked: nothing is left for the caller to do.
-    #[error(
-        "sign-in rejected after the authorization code was exchanged; the refresh token was revoked"
-    )]
-    RejectedAfterExchange {
-        #[source]
-        cause: PostExchangeRejection,
-    },
-    /// Rejected after the exchange, **and the revocation also failed**: the
-    /// refresh token stays live at Apple. See [`PendingRevocation`] for the
-    /// retry obligation this carries.
+    /// After token exchange it turned out that the exchanged `id_token` names a
+    /// different Apple user than the caller's identity token — someone else's authorization
+    /// code paired with this identity token, possibly a malicious client. That user's refresh
+    /// token was discarded: revoking would end their whole authorization of this app. Nothing
+    /// is left for the caller to do. See docs/architecture.md.
+    #[error("the exchanged id_token is for a different Apple user than the identity token; its refresh token was discarded")]
+    SubjectMismatch,
+    /// Rejected after the exchange: the refresh token Apple issued is live, and
+    /// `sign_up_or_log_in` deliberately did not revoke it. See
+    /// [`PendingRevocation`] for the obligation this carries.
     #[error(transparent)]
     RevocationRequired(Box<PendingRevocation>),
 }
