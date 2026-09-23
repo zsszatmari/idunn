@@ -185,10 +185,11 @@ pub enum PostExchangeRejection {
 
 /// A refresh token Apple issued that `sign_up_or_log_in` deliberately left
 /// unrevoked — see [`super::AppleAuthClient::sign_up_or_log_in`] and
-/// docs/architecture.md, "The revocation contract with `account_lookup`", for
-/// why idunn itself never calls `revoke_refresh_token` here. The revocation is
-/// the host's job, to be run after this call returns — possibly for several
-/// tokens in sequence, coordinated per that contract. Carried by
+/// docs/architecture.md, "Why revocations are coordinated by the host,
+/// through `account_lookup`", for why idunn itself never calls
+/// `revoke_refresh_token` here. The revocation is the host's job, to be run
+/// after this call returns — possibly for several tokens in sequence,
+/// coordinated per docs/usage.md, "The `account_lookup` contract". Carried by
 /// `SignInError::RevocationRequired`.
 #[derive(Debug, Error)]
 #[error(
