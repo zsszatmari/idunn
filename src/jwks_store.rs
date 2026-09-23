@@ -622,6 +622,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_key_age_overrides_a_longer_grace_period() {
+        let transport = MockHttpGet::sequence(vec![
+            Ok(jwks_body("kid-1")),
+            Err(TransportError::Http {
+                status: 500,
+                body: "boom".to_string(),
+            }),
+        ]);
+        let store = JwksStore::new(
+            VerificationConfig {
+                refresh_interval: Duration::from_millis(10),
+                cooldown_period: Duration::from_millis(10),
+                stale_key_grace_period: Duration::from_secs(60),
+                max_key_age: Duration::from_millis(30),
+            },
+            transport.clone(),
+        );
+
+        store.get_key("kid-1").await.unwrap();
+        assert_eq!(transport.call_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Misconfigured on purpose: max_key_age sits well inside the grace
+        // window. The grace period alone would still serve kid-1 from the
+        // snapshot without a fetch; max_key_age must win and force the refresh
+        // attempt, whose failure then fails closed.
+        let result = store.get_key("kid-1").await;
+        assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
+        assert_eq!(transport.call_count(), 2);
+    }
+
+    #[tokio::test]
     async fn malformed_json_does_not_surface_to_caller() {
         let transport = MockHttpGet::returning("not json".to_string());
         let store = JwksStore::new(VerificationConfig::default(), transport.clone());
