@@ -1,4 +1,5 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![doc = include_str!("../docs/usage.md")]
 // https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple
 // https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
 // https://developer.apple.com/support/offering-account-deletion-in-your-app/
@@ -309,11 +310,13 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// `id_token` fails verification, or its nonce doesn't match) returns
     /// `SignInError::RevocationRequired` (carrying a boxed
     /// [`PendingRevocation`] with the token and the verified identity): the
-    /// host revokes it after this call returns. See docs/architecture.md,
-    /// "Why `sign_up_or_log_in` never revokes, and discards another user's
-    /// token", and "The revocation contract with `account_lookup`" — the
-    /// latter also covers why a stale/unusable token reported by
-    /// `account_lookup` is simply discarded.
+    /// host revokes it after this call returns, per the contract in
+    /// docs/usage.md, "The `account_lookup` contract". The reasoning is in
+    /// docs/architecture.md, "Why `sign_up_or_log_in` never revokes, and
+    /// discards another user's token"; why a stale/unusable token reported by
+    /// `account_lookup` is simply discarded is covered separately in
+    /// docs/architecture.md, "Why a stale refresh token is discarded, not
+    /// revoked".
     // See docs/architecture.md: "Why sign_up_or_log_in's nonce checker is
     // `Fn(Option<String>) -> Fut`, not `AsyncFn`" — `account_lookup` follows
     // the same reasoning, except it's `FnOnce` since it's called at most once.
@@ -460,8 +463,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
 
 /// The refresh token is live at Apple and deliberately left unrevoked —
 /// revoking is authorization-scoped and could tear down a concurrent sign-in
-/// for the same Apple user. See docs/architecture.md, "The revocation
-/// contract with `account_lookup`".
+/// for the same Apple user. See docs/architecture.md, "Why revocations are
+/// coordinated by the host, through `account_lookup`".
 fn revocation_required(
     refresh_token: RefreshToken,
     identity: AppleIdentity,
@@ -1055,7 +1058,8 @@ mod tests {
     /// An unverifiable exchanged `id_token` leaves a live refresh token behind
     /// that `sign_up_or_log_in` hands straight back — no revoke attempt — for
     /// the host to revoke after the call returns. See docs/architecture.md,
-    /// "The revocation contract with `account_lookup`".
+    /// "Why revocations are coordinated by the host, through
+    /// `account_lookup`".
     #[tokio::test]
     async fn sign_up_or_log_in_hands_back_an_unverifiable_exchanged_token_without_revoking_it() {
         let config = test_token_config();
