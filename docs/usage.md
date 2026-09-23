@@ -12,8 +12,9 @@ docs/architecture.md.
 Each call runs, in order: verify the identity token, call `nonce_checker`,
 call `account_lookup`, and — only when `account_lookup` reports
 `AccountState::NeedsExchange` — exchange the authorization code, check the
-exchanged token's subject against the identity token's, then check its nonce
-a second time.
+exchanged token's subject against the identity token's, then compare the
+exchanged token's nonce against the identity token's already-accepted nonce.
+`nonce_checker` itself is called once, for the identity token only.
 
 | Outcome | What the host does |
 |---|---|

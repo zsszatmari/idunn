@@ -49,9 +49,9 @@ const MIN_REFRESH_DELAY: Duration = Duration::from_secs(1);
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
 /// that hex-encode in upper case, constant time protects a server-side-secret
 /// `expected_nonce` from a timing side channel — see docs/architecture.md for
-/// the limits of that protection. Used only by `sign_up_or_log_in_with_nonce`;
-/// the `sign_up_or_log_in` callback path compares inside the caller's own
-/// closure.
+/// the limits of that protection. Used by `sign_up_or_log_in_with_nonce`, and
+/// internally by `sign_up_or_log_in` to compare the exchanged `id_token`'s
+/// nonce against the identity token's already-accepted nonce.
 fn nonce_eq(candidate: Option<&str>, expected: &str) -> bool {
     let Some(candidate) = candidate else {
         return false;
@@ -280,11 +280,14 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// user — the full, safe path for a typical Sign in with Apple flow.
     ///
     /// `nonce_checker` gets the token's `nonce` claim verbatim (`None` only
-    /// under `NoncePolicy::Permissive`), called once for `identity_token` and,
-    /// only when the code is exchanged, once more for the exchanged
-    /// `id_token`. `Ok(false)` is a mismatch; `Err(_)` means the check itself
-    /// failed (e.g. a database lookup), reported as
-    /// `SignInError::NonceCheckFailed` rather than a false mismatch.
+    /// under `NoncePolicy::Permissive`), called exactly once, for
+    /// `identity_token`. `Ok(false)` is a mismatch; `Err(_)` means the check
+    /// itself failed (e.g. a database lookup), reported as
+    /// `SignInError::NonceCheckFailed` rather than a false mismatch. When the
+    /// code is exchanged, `sign_up_or_log_in` compares the exchanged
+    /// `id_token`'s nonce against the identity token's already-accepted
+    /// nonce with `nonce_eq` — see docs/architecture.md, "Why the exchanged
+    /// nonce is compared against the identity token's".
     ///
     /// `account_lookup` runs after the identity token and its nonce are
     /// verified, but before anything is spent at Apple — it decides whether
@@ -318,8 +321,9 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// docs/architecture.md, "Why a stale refresh token is discarded, not
     /// revoked".
     // See docs/architecture.md: "Why sign_up_or_log_in's nonce checker is
-    // `Fn(Option<String>) -> Fut`, not `AsyncFn`" — `account_lookup` follows
-    // the same reasoning, except it's `FnOnce` since it's called at most once.
+    // `FnOnce(Option<String>) -> Fut`, not `AsyncFn`" — `account_lookup`
+    // follows the same reasoning; both are `FnOnce` since each is called at
+    // most once.
     pub async fn sign_up_or_log_in<F, Fut, L, LFut>(
         &self,
         identity_token: &str,
@@ -328,7 +332,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         account_lookup: L,
     ) -> Result<SignInOutcome, SignInError>
     where
-        F: Fn(Option<String>) -> Fut,
+        F: FnOnce(Option<String>) -> Fut,
         Fut: Future<Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>> + Send,
         L: FnOnce(AppleIdentity) -> LFut,
         LFut: Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
@@ -373,12 +377,14 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
             return Err(SignInError::SubjectMismatch);
         }
 
-        // A failed lookup here still leaves a live token behind, exactly like an
-        // outright mismatch, so both are folded into `RevocationRequired` and
-        // the token is handed back for revocation either way — unlike the
-        // pre-exchange check, which surfaces a separate `NonceCheckFailed`.
-        let nonce_ok = nonce_checker(details.nonce.clone()).await.unwrap_or(false);
-        if !nonce_ok {
+        // See docs/architecture.md, "Why the exchanged nonce is compared
+        // against the identity token's".
+        let nonces_match = match (verified.nonce.as_deref(), details.nonce.as_deref()) {
+            (Some(expected), candidate) => nonce_eq(candidate, expected),
+            (None, None) => true,
+            (None, Some(_)) => false,
+        };
+        if !nonces_match {
             return Err(revocation_required(
                 details.refresh_token,
                 verified.identity,
@@ -699,6 +705,17 @@ mod tests {
     /// for tests that need a token whose nonce does *not* match what the client
     /// expects.
     fn signed_identity_token_with_nonce(aud: &str, sub: &str, nonce: &str) -> (String, u64, u64) {
+        signed_identity_token_with_optional_nonce(aud, sub, Some(nonce))
+    }
+
+    /// As `signed_identity_token_with_nonce`, but `nonce` may be absent — for
+    /// tests exercising `NoncePolicy::Permissive`. `None` serializes as a JSON
+    /// `null`, which `ApplePayload.nonce: Option<String>` reads as `None`.
+    fn signed_identity_token_with_optional_nonce(
+        aud: &str,
+        sub: &str,
+        nonce: Option<&str>,
+    ) -> (String, u64, u64) {
         let iat = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -939,6 +956,44 @@ mod tests {
         (client, identity_token, transport)
     }
 
+    /// As `client_for_sign_up_or_log_in`, but builds a `Permissive` client and
+    /// lets both the identity token's and the exchanged token's nonce be
+    /// `None`, for tests exercising `NoncePolicy::Permissive`.
+    fn permissive_client_for_sign_up_or_log_in(
+        identity_nonce: Option<&str>,
+        exchanged_nonce: Option<&str>,
+        exchanged_sub: &str,
+    ) -> (
+        AppleAuthClient<FakeAppleTransport, Permissive>,
+        String,
+        FakeAppleTransport,
+    ) {
+        let config = test_token_config();
+        let (identity_token, _, _) = signed_identity_token_with_optional_nonce(
+            &config.client_id,
+            "apple-user-1",
+            identity_nonce,
+        );
+        let (exchanged_id_token, _, _) = signed_identity_token_with_optional_nonce(
+            &config.client_id,
+            exchanged_sub,
+            exchanged_nonce,
+        );
+        let transport = FakeAppleTransport::new(
+            jwks_body_including(TEST_KID),
+            format!(
+                r#"{{"access_token":"at","refresh_token":"rt","id_token":"{exchanged_id_token}","expires_in":3600}}"#
+            ),
+        );
+        let client = AppleAuthClient::<FakeAppleTransport, Permissive>::with_nonce_requirement(
+            config,
+            VerificationConfig::default(),
+            transport.clone(),
+        )
+        .expect("valid test key should construct client");
+        (client, identity_token, transport)
+    }
+
     /// Lookup that always reports no usable account on file, so a test exercises
     /// the full exchange path — the behaviour the pre-lookup `sign_in` always had.
     fn needs_exchange()
@@ -1032,6 +1087,84 @@ mod tests {
         }
         assert_eq!(transport.posts().len(), 1);
         assert_eq!(transport.posts()[0].0, "https://appleid.apple.com/auth/token");
+    }
+
+    /// A checker that consumes a pending nonce (single-use, e.g. removing it
+    /// from a store) must only ever be called once. Regression test for the
+    /// bug where the exchanged token's nonce was passed back through
+    /// `nonce_checker` a second time, which made a single-use checker reject
+    /// every sign-up.
+    #[tokio::test]
+    async fn sign_up_or_log_in_signs_up_with_a_single_use_nonce_checker() {
+        let (client, identity_token, _transport) =
+            client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
+        let pending = Arc::new(StdMutex::new(std::collections::HashSet::from([
+            "expected-nonce".to_string(),
+        ])));
+
+        let outcome = client
+            .sign_up_or_log_in(
+                &identity_token,
+                "auth-code",
+                move |candidate| {
+                    let pending = pending.clone();
+                    async move {
+                        let removed = candidate
+                            .map(|nonce| pending.lock().unwrap().remove(&nonce))
+                            .unwrap_or(false);
+                        Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(removed)
+                    }
+                },
+                needs_exchange(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, SignInOutcome::SignedUp { .. }));
+    }
+
+    /// Under `NoncePolicy::Permissive`, an identity token and its exchanged
+    /// `id_token` may both legitimately carry no `nonce` claim.
+    #[tokio::test]
+    async fn permissive_sign_up_or_log_in_signs_up_when_neither_token_carries_a_nonce() {
+        let (client, identity_token, _transport) =
+            permissive_client_for_sign_up_or_log_in(None, None, "apple-user-1");
+
+        let outcome = client
+            .sign_up_or_log_in(
+                &identity_token,
+                "auth-code",
+                |_candidate| async move { Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true) },
+                needs_exchange(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, SignInOutcome::SignedUp { .. }));
+    }
+
+    /// An exchanged `id_token` carrying a nonce the identity token lacked is a
+    /// mismatch, not a silent pass — nothing was accepted to compare it
+    /// against.
+    #[tokio::test]
+    async fn permissive_sign_up_or_log_in_rejects_an_exchanged_nonce_the_identity_token_lacked() {
+        let (client, identity_token, _transport) =
+            permissive_client_for_sign_up_or_log_in(None, Some("some-nonce"), "apple-user-1");
+
+        let result = client
+            .sign_up_or_log_in(
+                &identity_token,
+                "auth-code",
+                |_candidate| async move { Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true) },
+                needs_exchange(),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SignInError::RevocationRequired(pending))
+                if matches!(pending.cause, PostExchangeRejection::NonceMismatch)
+        ));
     }
 
     /// A mismatched identity-token nonce is rejected before the authorization
