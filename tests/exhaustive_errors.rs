@@ -44,10 +44,20 @@ fn error_enums_can_be_matched_without_a_wildcard() {
     let _: fn(&PostExchangeRejection) = |e| match e {
         PostExchangeRejection::TokenUnverified(_) | PostExchangeRejection::NonceMismatch => {}
     };
-    let _: fn(&SignInError) = |e| match e {
+    let _: fn(&SignInError<std::io::Error, std::fmt::Error>) = |e| match e {
         SignInError::IdentityTokenRejected(_)
         | SignInError::NonceMismatch
         | SignInError::NonceCheckFailed(_)
+        | SignInError::AccountLookupFailed(_)
+        | SignInError::Exchange(_)
+        | SignInError::SubjectMismatch
+        | SignInError::RevocationRequired(_) => {}
+    };
+    // A `sign_up_or_log_in_with_nonce` result: `NonceErr` defaults to
+    // `Infallible`, so a by-value match may leave `NonceCheckFailed` out.
+    let _: fn(SignInError<std::io::Error>) = |e| match e {
+        SignInError::IdentityTokenRejected(_)
+        | SignInError::NonceMismatch
         | SignInError::AccountLookupFailed(_)
         | SignInError::Exchange(_)
         | SignInError::SubjectMismatch

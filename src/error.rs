@@ -201,22 +201,27 @@ pub struct PendingRevocation {
 }
 
 /// Error from `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`.
+/// `LookupErr` and `NonceErr` are the host's own error types, returned unchanged
+/// from `account_lookup` and `nonce_checker` — see docs/architecture.md, "Why
+/// `SignInError` carries the host's own error types". `NonceErr` defaults to
+/// `Infallible`: `sign_up_or_log_in_with_nonce`'s built-in checker cannot fail.
 #[derive(Debug, Error)]
-pub enum SignInError {
+pub enum SignInError<LookupErr, NonceErr = std::convert::Infallible> {
     // --- BEFORE the exchange: nothing was spent at Apple, no token exists ---
     #[error(transparent)]
     IdentityTokenRejected(#[from] VerificationError),
     #[error("the identity token's nonce does not match the expected value")]
     NonceMismatch,
     /// The nonce check itself could not be completed (e.g. the caller's session
-    /// lookup failed). This does *not* mean the nonce was wrong.
+    /// lookup failed). This does *not* mean the nonce was wrong. Carries the
+    /// checker's own error, unchanged.
     #[error("the nonce check could not be completed: {0}")]
-    NonceCheckFailed(Box<dyn std::error::Error + Send + Sync>),
+    NonceCheckFailed(NonceErr),
     /// The caller's `account_lookup` failed (e.g. a database error). Says nothing
     /// about whether the account exists — a genuine lookup failure, not a
-    /// negative result.
+    /// negative result. Carries the lookup's own error, unchanged.
     #[error("the account lookup could not be completed: {0}")]
-    AccountLookupFailed(Box<dyn std::error::Error + Send + Sync>),
+    AccountLookupFailed(LookupErr),
     #[error(transparent)]
     Exchange(#[from] TokenExchangeError),
 

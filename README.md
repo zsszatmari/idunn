@@ -27,7 +27,7 @@ let outcome = match apple
         |identity| async move {
             // Your storage: AccountState::AlreadyOnFile if a usable refresh
             // token is stored for this Apple user, NeedsExchange otherwise.
-            lookup_account(&identity.apple_user_id).await.map_err(Into::into)
+            lookup_account(&identity.apple_user_id).await
         },
     )
     .await
@@ -38,7 +38,8 @@ let outcome = match apple
         // queue pending.refresh_token for revocation, never just drop it.
         return Err(MyError::SignInRejected);
     }
-    // Your `From<SignInError> for MyError` matches every variant, with no
+    // Your `From<SignInError<LookupError>> for MyError`, where LookupError is
+    // lookup_account's own error type, matches every variant with no
     // wildcard: a variant added in a later idunn version won't compile until
     // you decide what it means.
     Err(err) => return Err(err.into()),
@@ -60,7 +61,7 @@ apple.revoke_refresh_token(&stored_refresh_token).await?;
 
 What `lookup_account` must guarantee, and how to run the revocation queue, is described in [docs/usage.md](docs/usage.md), "The `account_lookup` contract".
 
-## Why you'd reach for it
+## Highlights 
 
 - **One client, one constructor.** Identity verification and token exchange belong together, therefore idunn is constructed to make it hard to end up with a sign-in flow that can never revoke a token — a mandatory requirement under Apple's own rules (TN3194).
 - **Verified by default.** `sign_up_or_log_in` never hands back an Apple `id_token` it hasn't checked itself — signature, issuer, audience, expiry, nonce presence — so there's no raw JWT for a caller to accidentally trust unchecked.

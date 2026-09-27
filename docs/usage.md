@@ -41,6 +41,8 @@ Each call runs, in order: verify the identity token, call `nonce_checker`, call 
 
 `SignInError` is exhaustive: match its variants without a wildcard, so that a failure mode added in a later idunn version fails to compile in your code rather than falling into a default branch. Payloads you treat uniformly, such as the `AppleErrorCode` inside `Exchange(TokenExchangeFailed(code))`, can be bound whole. See docs/architecture.md, "Why the error enums are exhaustive".
 
+`SignInError<LookupErr, NonceErr>` hands your own hook errors back unchanged: `account_lookup`'s `Err(e)` as `AccountLookupFailed(e)`, and `nonce_checker`'s as `NonceCheckFailed(e)`, each with its own type, so there is nothing to box or downcast. `sign_up_or_log_in_with_nonce` returns `SignInError<LookupErr>`: its built-in checker cannot fail, so `NonceErr` defaults to `Infallible`, and a by-value match can leave `NonceCheckFailed` out.
+
 **Replay caveat on the `LoggedIn` branch:** no code is spent, so `nonce_checker` must be effectively single-use — it is the only replay defense left on that branch. Details are in the `sign_up_or_log_in` rustdoc and docs/architecture.md, "Why `sign_up_or_log_in` may skip the exchange, and what it costs".
 
 ## The `account_lookup` contract

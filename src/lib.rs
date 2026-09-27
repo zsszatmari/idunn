@@ -282,11 +282,12 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// under `NoncePolicy::Permissive`), called exactly once, for
     /// `identity_token`. `Ok(false)` is a mismatch; `Err(_)` means the check
     /// itself failed (e.g. a database lookup), reported as
-    /// `SignInError::NonceCheckFailed` rather than a false mismatch. When the
-    /// code is exchanged, `sign_up_or_log_in` compares the exchanged
-    /// `id_token`'s nonce against the identity token's already-accepted
-    /// nonce with `nonce_eq` — see docs/architecture.md, "Why the exchanged
-    /// nonce is compared against the identity token's".
+    /// `SignInError::NonceCheckFailed` (carrying the checker's error
+    /// unchanged) rather than a false mismatch. When the code is exchanged,
+    /// `sign_up_or_log_in` compares the exchanged `id_token`'s nonce against
+    /// the identity token's already-accepted nonce with `nonce_eq` — see
+    /// docs/architecture.md, "Why the exchanged nonce is compared against the
+    /// identity token's".
     ///
     /// `account_lookup` runs after the identity token and its nonce are
     /// verified, but before anything is spent at Apple — it decides whether
@@ -294,8 +295,9 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// `AccountState::AlreadyOnFile` returns `SignInOutcome::LoggedIn`
     /// immediately, leaving the code unspent; `AccountState::NeedsExchange`
     /// falls through to the exchange. `Err(_)` is
-    /// `SignInError::AccountLookupFailed` — a lookup failure, not a verdict
-    /// that the account doesn't exist.
+    /// `SignInError::AccountLookupFailed` (carrying the lookup's error
+    /// unchanged) — a lookup failure, not a verdict that the account doesn't
+    /// exist.
     ///
     /// **Replay caveat for the login branch:** ordinarily, exchanging the
     /// authorization code is a de-facto single-use check — replaying a
@@ -323,19 +325,18 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     // `FnOnce(Option<String>) -> Fut`, not `AsyncFn`" — `account_lookup`
     // follows the same reasoning; both are `FnOnce` since each is called at
     // most once.
-    pub async fn sign_up_or_log_in<F, Fut, L, LFut>(
+    pub async fn sign_up_or_log_in<F, Fut, L, LFut, NonceErr, LookupErr>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         nonce_checker: F,
         account_lookup: L,
-    ) -> Result<SignInOutcome, SignInError>
+    ) -> Result<SignInOutcome, SignInError<LookupErr, NonceErr>>
     where
         F: FnOnce(Option<String>) -> Fut,
-        Fut: Future<Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>> + Send,
+        Fut: Future<Output = Result<bool, NonceErr>> + Send,
         L: FnOnce(AppleIdentity) -> LFut,
-        LFut:
-            Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
+        LFut: Future<Output = Result<AccountState, LookupErr>> + Send,
     {
         let verified = self.verify_identity_token(identity_token).await?;
         match nonce_checker(verified.nonce.clone()).await {
@@ -471,11 +472,11 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
 /// revoking is authorization-scoped and could tear down a concurrent sign-in
 /// for the same Apple user. See docs/architecture.md, "Why revocations are
 /// coordinated by the host, through `account_lookup`".
-fn revocation_required(
+fn revocation_required<LookupErr, NonceErr>(
     refresh_token: RefreshToken,
     identity: AppleIdentity,
     cause: PostExchangeRejection,
-) -> SignInError {
+) -> SignInError<LookupErr, NonceErr> {
     SignInError::RevocationRequired(Box::new(PendingRevocation {
         refresh_token,
         identity,
@@ -641,22 +642,23 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     ///     }
     /// }, account_lookup).await
     /// ```
-    pub async fn sign_up_or_log_in_with_nonce<L, LFut>(
+    pub async fn sign_up_or_log_in_with_nonce<L, LFut, LookupErr>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         expected_nonce: &str,
         account_lookup: L,
-    ) -> Result<SignInOutcome, SignInError>
+    ) -> Result<SignInOutcome, SignInError<LookupErr>>
     where
         L: FnOnce(AppleIdentity) -> LFut,
-        LFut:
-            Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
+        LFut: Future<Output = Result<AccountState, LookupErr>> + Send,
     {
         self.sign_up_or_log_in(
             identity_token,
             authorization_code,
-            move |candidate| async move { Ok(nonce_eq(candidate.as_deref(), expected_nonce)) },
+            move |candidate| async move {
+                Ok::<_, std::convert::Infallible>(nonce_eq(candidate.as_deref(), expected_nonce))
+            },
             account_lookup,
         )
         .await
@@ -1080,20 +1082,18 @@ mod tests {
         (client, identity_token, transport)
     }
 
+    /// Stand-ins for a host's own `account_lookup` / `nonce_checker` error types.
+    /// Distinct types, so a test that mixes the two up fails to compile.
+    #[derive(Debug, PartialEq, Eq)]
+    struct LookupFailure(&'static str);
+    #[derive(Debug, PartialEq, Eq)]
+    struct NonceStoreFailure(&'static str);
+
     /// Lookup that always reports no usable account on file, so a test exercises
     /// the full exchange path — the behaviour the pre-lookup `sign_in` always had.
-    fn needs_exchange() -> impl FnOnce(
-        AppleIdentity,
-    ) -> std::future::Ready<
-        Result<AccountState, Box<dyn std::error::Error + Send + Sync>>,
-    > {
-        // Explicit turbofish needed: nothing else pins the error type here, same
-        // as the existing `Err::<bool, Box<dyn ...>>` annotation further below.
-        |_identity| {
-            std::future::ready(Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
-                AccountState::NeedsExchange,
-            ))
-        }
+    fn needs_exchange()
+    -> impl FnOnce(AppleIdentity) -> std::future::Ready<Result<AccountState, LookupFailure>> {
+        |_identity| std::future::ready(Ok(AccountState::NeedsExchange))
     }
 
     fn assert_send<T: Send>(_: T) {}
@@ -1136,7 +1136,9 @@ mod tests {
             "auth-code",
             move |candidate| {
                 let expected = expected.clone();
-                async move { Ok(candidate.as_deref() == Some(expected.as_str())) }
+                async move {
+                    Ok::<bool, std::convert::Infallible>(candidate.as_deref() == Some(expected.as_str()))
+                }
             },
             needs_exchange(),
         ));
@@ -1145,10 +1147,11 @@ mod tests {
     /// `sign_up_or_log_in` returns `Result<_, SignInError>` from every frame on
     /// the success path too, so the error stays under clippy's 128-byte
     /// `result_large_err` budget: `RevocationRequired`'s payload is boxed to
-    /// keep it there.
+    /// keep it there. Measures idunn's own variants only — a host's
+    /// `LookupErr`/`NonceErr` adds its own size on top.
     #[test]
     fn sign_in_error_stays_small() {
-        assert!(std::mem::size_of::<SignInError>() <= 128);
+        assert!(std::mem::size_of::<SignInError<(), ()>>() <= 128);
     }
 
     #[tokio::test]
@@ -1206,7 +1209,7 @@ mod tests {
                         let removed = candidate
                             .map(|nonce| pending.lock().unwrap().remove(&nonce))
                             .unwrap_or(false);
-                        Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(removed)
+                        Ok::<bool, std::convert::Infallible>(removed)
                     }
                 },
                 needs_exchange(),
@@ -1224,18 +1227,15 @@ mod tests {
         let (client, identity_token, _transport) =
             permissive_client_for_sign_up_or_log_in(None, None, "apple-user-1");
 
-        let outcome =
-            client
-                .sign_up_or_log_in(
-                    &identity_token,
-                    "auth-code",
-                    |_candidate| async move {
-                        Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true)
-                    },
-                    needs_exchange(),
-                )
-                .await
-                .unwrap();
+        let outcome = client
+            .sign_up_or_log_in(
+                &identity_token,
+                "auth-code",
+                |_candidate| async move { Ok::<bool, std::convert::Infallible>(true) },
+                needs_exchange(),
+            )
+            .await
+            .unwrap();
 
         assert!(matches!(outcome, SignInOutcome::SignedUp { .. }));
     }
@@ -1248,17 +1248,14 @@ mod tests {
         let (client, identity_token, _transport) =
             permissive_client_for_sign_up_or_log_in(None, Some("some-nonce"), "apple-user-1");
 
-        let result =
-            client
-                .sign_up_or_log_in(
-                    &identity_token,
-                    "auth-code",
-                    |_candidate| async move {
-                        Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true)
-                    },
-                    needs_exchange(),
-                )
-                .await;
+        let result = client
+            .sign_up_or_log_in(
+                &identity_token,
+                "auth-code",
+                |_candidate| async move { Ok::<bool, std::convert::Infallible>(true) },
+                needs_exchange(),
+            )
+            .await;
 
         assert!(matches!(
             result,
@@ -1420,15 +1417,18 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 |_candidate| async move {
-                    Err::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                        "session store unavailable".into(),
-                    )
+                    Err::<bool, _>(NonceStoreFailure("session store unavailable"))
                 },
                 needs_exchange(),
             )
             .await;
 
-        assert!(matches!(result, Err(SignInError::NonceCheckFailed(_))));
+        assert!(matches!(
+            result,
+            Err(SignInError::NonceCheckFailed(NonceStoreFailure(
+                "session store unavailable"
+            )))
+        ));
         assert!(transport.posts().is_empty());
     }
 
@@ -1459,7 +1459,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                |_identity| async move { Ok(AccountState::AlreadyOnFile) },
+                |_identity| async move { Ok::<_, LookupFailure>(AccountState::AlreadyOnFile) },
             )
             .await
             .unwrap();
@@ -1484,14 +1484,17 @@ mod tests {
                 "auth-code",
                 "expected-nonce",
                 |_identity| async move {
-                    Err::<AccountState, Box<dyn std::error::Error + Send + Sync>>(
-                        "account store unavailable".into(),
-                    )
+                    Err::<AccountState, _>(LookupFailure("account store unavailable"))
                 },
             )
             .await;
 
-        assert!(matches!(result, Err(SignInError::AccountLookupFailed(_))));
+        assert!(matches!(
+            result,
+            Err(SignInError::AccountLookupFailed(LookupFailure(
+                "account store unavailable"
+            )))
+        ));
         assert!(transport.posts().is_empty());
     }
 
