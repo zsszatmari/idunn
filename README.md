@@ -9,7 +9,7 @@ you typed, verified results and gets out of the way.
 ## Why you'd reach for it
 
 - **One client, one constructor.** Identity verification and token exchange
-  are impossible to wire up separately, so it's impossible to end up with a
+  belong together, therefore idunn is constructed to make it hard to end up with a
   sign-in flow that can never revoke a token — a mandatory requirement
   under Apple's own rules (TN3194).
 - **Verified by default.** `sign_up_or_log_in` never hands back an Apple
@@ -20,13 +20,13 @@ you typed, verified results and gets out of the way.
   get hand-written, redacting `Debug` impls and zeroize-on-drop, so an
   `unwrap()` panic or a stray `{:?}` in a log line can't print a live
   credential.
-- **An injectable HTTP transport**, so the whole crate is unit-testable
-  without a network and swappable onto a different HTTP stack.
+- **An injectable HTTP transport**, so you can bring your own HTTP client.
+  reqwest is supported out of the box,
 
 What it deliberately does not do: store anything, decide who "owns" an
 Apple account, or coordinate concurrent sign-ins and revocations for the
 same user — that needs a shared view of your own application state, so
-it's your job, guided by `account_lookup`. See
+it's your job, but it's guided by `account_lookup`. See
 [docs/usage.md](docs/usage.md) for that contract and
 [docs/architecture.md](docs/architecture.md) for the reasoning behind the
 crate's design.
@@ -60,8 +60,7 @@ they start aging; get the apples back and they're restored. That's close
 enough to what this crate does with Apple's tokens: it holds the things
 that keep a user's session valid, checks them properly before handing them
 back, and makes sure a stale or compromised one gets taken out of
-circulation promptly. The name is short enough to type in a `Cargo.toml`
-without wincing, and it was the apple pun that stuck.
+circulation promptly.
 
 ## License
 
