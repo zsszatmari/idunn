@@ -497,19 +497,28 @@ mod tests {
         assert!(matches!(result, Err(TokenRevocationError::NetworkError(_))));
     }
 
-    /// Hits Apple's real `/auth/revoke` endpoint with an unknown, clearly-marked-as-test
-    /// refresh token. Per Apple's docs, revoke is idempotent for anti-enumeration
-    /// reasons: it returns 200 with no body both on a real revocation and when the
-    /// token was already invalid/unknown — so this only confirms live connectivity and
-    /// request shape, not error parsing (see the sibling test below for that). Not
-    /// `#[ignore]`d — it needs network access, which this development sandbox's Bash
-    /// tool doesn't have, so it couldn't be run/verified while writing it; it still
-    /// runs under a normal `cargo test` for anyone with network access (e.g. CI).
+    /// Contract test against Apple's real `/auth/revoke` endpoint. Ignored so `cargo
+    /// test` and PR CI don't depend on Apple's availability; run it explicitly (see
+    /// below) or via the weekly `live-apple` workflow.
+    ///
+    /// Proves less than it looks: it's signed with the throwaway `test_config()` key,
+    /// which Apple has never seen, and Apple still answers 200. Per Apple's docs,
+    /// revoke is idempotent for anti-enumeration reasons — it returns 200 with no body
+    /// both on a real revocation and when the token was already invalid/unknown — and
+    /// empirically Apple also doesn't reject an unverifiable `client_secret` outright
+    /// (the sibling test's doc comment below records Apple returning 200 even for
+    /// `"not-a-valid-jwt"` as `client_secret`). So this only confirms live connectivity
+    /// and request shape, not
+    /// that Apple accepted our signature; it cannot catch a broken `client_secret`
+    /// signature. The JWT's shape (header, claims, expiry) is covered offline by
+    /// `client_secret_is_a_well_formed_apple_jwt`; actually proving Apple accepts the
+    /// signature would need a real Team ID, Key ID and private key.
     ///
     /// To see the exact bytes sent/received on the wire, run with:
-    /// `RUST_LOG=reqwest=trace cargo test real_apple_revoke_endpoint -- --nocapture`
+    /// `RUST_LOG=reqwest=trace cargo test -- --ignored real_apple_revoke_endpoint --nocapture`
     /// (uses reqwest's own built-in `connection_verbose` wire logging, not a custom dump).
     #[tokio::test]
+    #[ignore = "calls Apple's live endpoint; run with `cargo test -- --ignored real_apple`"]
     async fn real_apple_revoke_endpoint_is_idempotent_for_an_unknown_token() {
         let _ = env_logger::try_init();
         let config = test_config();
@@ -534,7 +543,12 @@ mod tests {
     /// neither is a present-but-garbage `client_secret` (Apple accepted
     /// `"not-a-valid-jwt"` as one with a 200); a genuinely *missing* required parameter
     /// is Apple's documented `invalid_request` trigger, so this targets that instead.
+    ///
+    /// Ignored for the same reason as the sibling test above — this is a contract test
+    /// against Apple's live API, not against our own change; it runs in the weekly
+    /// `live-apple` workflow instead of on every PR.
     #[tokio::test]
+    #[ignore = "calls Apple's live endpoint; run with `cargo test -- --ignored real_apple`"]
     async fn real_apple_revoke_endpoint_rejects_a_missing_client_secret() {
         let _ = env_logger::try_init();
         let client = reqwest::Client::builder()

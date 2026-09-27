@@ -716,7 +716,11 @@ mod tests {
         assert_eq!(transport.call_count(), 1);
     }
 
+    /// Contract test: Apple's live JWKS endpoint returns a JWK set that parses into at
+    /// least one usable key. Ignored so `cargo test` and PR CI don't depend on Apple's
+    /// availability; runs instead in the weekly `live-apple` workflow.
     #[tokio::test]
+    #[ignore = "calls Apple's live endpoint; run with `cargo test -- --ignored real_apple`"]
     async fn real_apple_refresh() {
         let transport = crate::transport::ReqwestTransport::default();
         let result = transport.get(JWKS_URL, &[], REQUEST_TIMEOUT).await;

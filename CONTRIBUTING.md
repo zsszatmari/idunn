@@ -52,6 +52,7 @@ cargo fmt --all           # formatting
 just check-features       # every feature in isolation still compiles
 just cargo-deny           # license / advisory / source checks
 just coverage             # local HTML coverage report
+cargo test -- --ignored real_apple  # live Apple contract tests (network)
 ```
 
 Guidelines for the change itself:
