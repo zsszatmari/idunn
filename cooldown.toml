@@ -1,0 +1,13 @@
+[cooldown]
+incompatible-publish-age = "fallback"
+# `prompt` asks before accepting fresh versions Cargo still requires; `auto` keeps the current best Cargo-valid lockfile without asking.
+fallback-accept = "prompt"
+# `floor` keeps initial Cargo.lock versions as the minimum; `ignore` allows lower versions.
+lockfile-baseline = "ignore"
+
+[registry]
+global-min-publish-age = "14 days"
+
+[[allow.package]]
+crate = "rustls"
+min-publish-age = "1 day"

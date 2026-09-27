@@ -39,6 +39,8 @@ Each call runs, in order: verify the identity token, call `nonce_checker`, call 
 | `Err(SignInError::SubjectMismatch)` | Nothing to do — the token belongs to another Apple user and was discarded, never persisted. Worth logging as a security event. |
 | `Err(SignInError::RevocationRequired(pending))` | A refresh token is live at Apple. File a pending revocation — see "The `account_lookup` contract" below. |
 
+`SignInError` is exhaustive: match its variants without a wildcard, so that a failure mode added in a later idunn version fails to compile in your code rather than falling into a default branch. Payloads you treat uniformly, such as the `AppleErrorCode` inside `Exchange(TokenExchangeFailed(code))`, can be bound whole. See docs/architecture.md, "Why the error enums are exhaustive".
+
 **Replay caveat on the `LoggedIn` branch:** no code is spent, so `nonce_checker` must be effectively single-use — it is the only replay defense left on that branch. Details are in the `sign_up_or_log_in` rustdoc and docs/architecture.md, "Why `sign_up_or_log_in` may skip the exchange, and what it costs".
 
 ## The `account_lookup` contract

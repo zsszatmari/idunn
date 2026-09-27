@@ -6,7 +6,6 @@ use thiserror::Error;
 /// `AppleAuthClient::verify_identity_token`, and embedded in
 /// `CodeExchangeError::ExchangedTokenUnverified` when it's the `id_token` from a
 /// token exchange that fails verification instead.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum VerificationError {
     /// The token is confirmed invalid — see `cause` for specifics.
@@ -20,10 +19,7 @@ pub enum VerificationError {
     CannotVerifyToken,
 }
 
-/// Why an Apple identity token was found to be invalid. Only the causes this
-/// crate currently detects are listed; more (issuer mismatch, expiry, bad
-/// signature, ...) will be added as identity verification is completed.
-#[non_exhaustive]
+/// Why an Apple identity token was found to be invalid.
 #[derive(Debug, Error)]
 pub enum InvalidTokenCause {
     /// The token's `kid` is missing from its header, or isn't in Apple's
@@ -49,7 +45,6 @@ pub enum InvalidTokenCause {
 
 /// Apple's documented `ErrorResponse.error` codes.
 /// https://developer.apple.com/documentation/signinwithapplerestapi/errorresponse
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AppleErrorCode {
     #[error("invalid_request: the request is malformed")]
@@ -119,7 +114,6 @@ pub struct ClientSecretError(#[from] jsonwebtoken::errors::Error);
 /// Apple's token endpoint — the exchange itself; a verification failure of
 /// the resulting `id_token` is `CodeExchangeError::ExchangedTokenUnverified`
 /// instead.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum TokenExchangeError {
     #[error("network error: {0}")]
@@ -133,7 +127,6 @@ pub enum TokenExchangeError {
 }
 
 /// Error from `AppleAuthClient::revoke_refresh_token`.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum TokenRevocationError {
     #[error("network error: {0}")]
@@ -145,7 +138,6 @@ pub enum TokenRevocationError {
 }
 
 /// Error from `AppleAuthClient::exchange_authorization_code`.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum CodeExchangeError {
     #[error(transparent)]
@@ -171,7 +163,6 @@ pub enum CodeExchangeError {
 /// now describes why we rejected the sign-in after an exchange whose token
 /// (to idunn's best knowledge) belongs to the caller's own Apple user; see
 /// `SignInError::RevocationRequired`.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum PostExchangeRejection {
     /// Apple's token endpoint exchanged the code, but the `id_token` it returned
@@ -210,7 +201,6 @@ pub struct PendingRevocation {
 }
 
 /// Error from `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`.
-#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum SignInError {
     // --- BEFORE the exchange: nothing was spent at Apple, no token exists ---
