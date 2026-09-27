@@ -69,3 +69,7 @@ Guidelines for the change itself:
   commit message.
 - Keep commits focused, with a message that explains *why* the change is being
   made.
+
+CI (`.github/workflows/ci.yml`) runs these checks through the same `just`
+recipes, plus the full feature powerset and a minimal-dependency-versions
+build; the live Apple contract tests are not part of PR CI.
