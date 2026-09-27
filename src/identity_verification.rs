@@ -66,8 +66,8 @@ pub struct AppleEmail {
 /// Apple's `real_user_status` fraud signal (`ASUserDetectionStatus`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RealUserStatus {
-    /// Apple's `0` — specifically meaning reffering to real user status not being 
-    /// supported for web-based apps or below. iOS 14 / macOS 11. An absent real 
+    /// Apple's `0` — specifically meaning reffering to real user status not being
+    /// supported for web-based apps or below. iOS 14 / macOS 11. An absent real
     /// user status claim maps (not first login per user) just maps to `None`.
     /// (see`AppleIdentity::real_user_status`)
     Unsupported,

@@ -17,7 +17,9 @@ pub use error::{
     InvalidTokenCause, PendingRevocation, PostExchangeRejection, SignInError, TokenExchangeError,
     TokenRevocationError, VerificationError,
 };
-pub use identity_verification::{AppleEmail, AppleIdentity, IdentityWithPendingNonce, RealUserStatus};
+pub use identity_verification::{
+    AppleEmail, AppleIdentity, IdentityWithPendingNonce, RealUserStatus,
+};
 pub use token_exchange::{AppleTokenConfig, RefreshToken};
 pub use transport::{HttpGet, HttpPost, HttpTransport, TransportError};
 
@@ -40,9 +42,9 @@ use subtle::ConstantTimeEq;
 /// regardless of what `refresh_keystore()` suggests. `refresh_keystore()`
 /// passes through caller-supplied `VerificationConfig` durations verbatim —
 /// `refresh_interval` on success, `cooldown_period` on failure or
-/// cooldown-skip — either of which may be `Duration::ZERO`. On the manual 
-/// `refresh_keystore` path that's the caller's own problem; here the loop owns 
-/// the task, so a `ZERO` config combined with a persistent fetch failure would 
+/// cooldown-skip — either of which may be `Duration::ZERO`. On the manual
+/// `refresh_keystore` path that's the caller's own problem; here the loop owns
+/// the task, so a `ZERO` config combined with a persistent fetch failure would
 /// otherwise spin tight and hammer Apple with no rate limit to stop it.
 const MIN_REFRESH_DELAY: Duration = Duration::from_secs(1);
 
@@ -321,7 +323,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         F: FnOnce(Option<String>) -> Fut,
         Fut: Future<Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>> + Send,
         L: FnOnce(AppleIdentity) -> LFut,
-        LFut: Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
+        LFut:
+            Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
     {
         let verified = self.verify_identity_token(identity_token).await?;
         match nonce_checker(verified.nonce.clone()).await {
@@ -552,7 +555,10 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     pub fn with_refresh_loop<S, Fut>(
         self,
         sleep: S,
-    ) -> (AppleAuthClient<T, N>, impl Future<Output = ()> + Send + use<T, N, S, Fut>)
+    ) -> (
+        AppleAuthClient<T, N>,
+        impl Future<Output = ()> + Send + use<T, N, S, Fut>,
+    )
     where
         S: Fn(Duration) -> Fut + Send + 'static,
         Fut: Future + Send,
@@ -633,7 +639,8 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     ) -> Result<SignInOutcome, SignInError>
     where
         L: FnOnce(AppleIdentity) -> LFut,
-        LFut: Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
+        LFut:
+            Future<Output = Result<AccountState, Box<dyn std::error::Error + Send + Sync>>> + Send,
     {
         self.sign_up_or_log_in(
             identity_token,
@@ -840,13 +847,10 @@ mod tests {
         let config = test_token_config();
         let (token, iat, exp) = signed_identity_token(&config.client_id, "apple-user-1");
         let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
-        let client = AppleAuthClient::with_transport(
-            config,
-            VerificationConfig::default(),
-            transport,
-        )
-        .expect("valid test key should construct client")
-        .without_background_refresh();
+        let client =
+            AppleAuthClient::with_transport(config, VerificationConfig::default(), transport)
+                .expect("valid test key should construct client")
+                .without_background_refresh();
 
         let IdentityWithPendingNonce { nonce, identity } =
             client.verify_identity_token(&token).await.unwrap();
@@ -872,13 +876,10 @@ mod tests {
         let mut config = original_config;
         config.client_id = "com.example.other".to_string();
         let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
-        let client = AppleAuthClient::with_transport(
-            config,
-            VerificationConfig::default(),
-            transport,
-        )
-        .expect("valid test key should construct client")
-        .without_background_refresh();
+        let client =
+            AppleAuthClient::with_transport(config, VerificationConfig::default(), transport)
+                .expect("valid test key should construct client")
+                .without_background_refresh();
 
         let result = client.verify_identity_token(&token).await;
 
@@ -1019,9 +1020,13 @@ mod tests {
                 r#"{{"access_token":"at","refresh_token":"rt","id_token":"{exchanged_id_token}","expires_in":3600}}"#
             ),
         );
-        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
-            .expect("valid test key should construct client")
-            .without_background_refresh();
+        let client = AppleAuthClient::with_transport(
+            config,
+            VerificationConfig::default(),
+            transport.clone(),
+        )
+        .expect("valid test key should construct client")
+        .without_background_refresh();
         (client, identity_token, transport)
     }
 
@@ -1066,9 +1071,11 @@ mod tests {
 
     /// Lookup that always reports no usable account on file, so a test exercises
     /// the full exchange path — the behaviour the pre-lookup `sign_in` always had.
-    fn needs_exchange()
-    -> impl FnOnce(AppleIdentity) -> std::future::Ready<Result<AccountState, Box<dyn std::error::Error + Send + Sync>>>
-    {
+    fn needs_exchange() -> impl FnOnce(
+        AppleIdentity,
+    ) -> std::future::Ready<
+        Result<AccountState, Box<dyn std::error::Error + Send + Sync>>,
+    > {
         // Explicit turbofish needed: nothing else pins the error type here, same
         // as the existing `Err::<bool, Box<dyn ...>>` annotation further below.
         |_identity| {
@@ -1084,7 +1091,8 @@ mod tests {
     /// Nothing here is awaited, so `client_for_sign_up_or_log_in`'s arguments don't matter.
     #[test]
     fn verification_and_exchange_futures_are_send() {
-        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
+        let (client, identity_token, _transport) =
+            client_for_sign_up_or_log_in("nonce", "apple-user-1");
         assert_send(client.verify_identity_token(&identity_token));
         assert_send(client.exchange_authorization_code("auth-code"));
         assert_send(client.revoke_refresh_token("refresh-token"));
@@ -1094,7 +1102,8 @@ mod tests {
     /// required by `Send`-bound callers such as axum handlers.
     #[test]
     fn sign_up_or_log_in_with_nonce_future_is_send() {
-        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
+        let (client, identity_token, _transport) =
+            client_for_sign_up_or_log_in("nonce", "apple-user-1");
         assert_send(client.sign_up_or_log_in_with_nonce(
             &identity_token,
             "auth-code",
@@ -1108,7 +1117,8 @@ mod tests {
     /// callers such as axum handlers.
     #[test]
     fn sign_up_or_log_in_future_is_send() {
-        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
+        let (client, identity_token, _transport) =
+            client_for_sign_up_or_log_in("nonce", "apple-user-1");
         let expected = String::from("nonce");
         assert_send(client.sign_up_or_log_in(
             &identity_token,
@@ -1156,7 +1166,10 @@ mod tests {
             other => panic!("expected SignedUp, got {other:?}"),
         }
         assert_eq!(transport.posts().len(), 1);
-        assert_eq!(transport.posts()[0].0, "https://appleid.apple.com/auth/token");
+        assert_eq!(
+            transport.posts()[0].0,
+            "https://appleid.apple.com/auth/token"
+        );
     }
 
     /// A checker that consumes a pending nonce (single-use, e.g. removing it
@@ -1200,15 +1213,18 @@ mod tests {
         let (client, identity_token, _transport) =
             permissive_client_for_sign_up_or_log_in(None, None, "apple-user-1");
 
-        let outcome = client
-            .sign_up_or_log_in(
-                &identity_token,
-                "auth-code",
-                |_candidate| async move { Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true) },
-                needs_exchange(),
-            )
-            .await
-            .unwrap();
+        let outcome =
+            client
+                .sign_up_or_log_in(
+                    &identity_token,
+                    "auth-code",
+                    |_candidate| async move {
+                        Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true)
+                    },
+                    needs_exchange(),
+                )
+                .await
+                .unwrap();
 
         assert!(matches!(outcome, SignInOutcome::SignedUp { .. }));
     }
@@ -1221,14 +1237,17 @@ mod tests {
         let (client, identity_token, _transport) =
             permissive_client_for_sign_up_or_log_in(None, Some("some-nonce"), "apple-user-1");
 
-        let result = client
-            .sign_up_or_log_in(
-                &identity_token,
-                "auth-code",
-                |_candidate| async move { Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true) },
-                needs_exchange(),
-            )
-            .await;
+        let result =
+            client
+                .sign_up_or_log_in(
+                    &identity_token,
+                    "auth-code",
+                    |_candidate| async move {
+                        Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(true)
+                    },
+                    needs_exchange(),
+                )
+                .await;
 
         assert!(matches!(
             result,
@@ -1241,7 +1260,8 @@ mod tests {
     /// code is ever exchanged — pins that `sign_up_or_log_in` checks the free
     /// thing first.
     #[tokio::test]
-    async fn sign_up_or_log_in_rejects_a_mismatched_identity_token_nonce_without_spending_the_code() {
+    async fn sign_up_or_log_in_rejects_a_mismatched_identity_token_nonce_without_spending_the_code()
+    {
         let (client, identity_token, transport) =
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
@@ -1271,9 +1291,13 @@ mod tests {
             jwks_body_including(TEST_KID),
             r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
         );
-        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
-            .expect("valid test key should construct client")
-            .without_background_refresh();
+        let client = AppleAuthClient::with_transport(
+            config,
+            VerificationConfig::default(),
+            transport.clone(),
+        )
+        .expect("valid test key should construct client")
+        .without_background_refresh();
 
         let result = client
             .sign_up_or_log_in_with_nonce(
@@ -1333,7 +1357,8 @@ mod tests {
     /// The token is simply discarded: see docs/architecture.md, "Why
     /// `sign_up_or_log_in` never revokes, and discards another user's token".
     #[tokio::test]
-    async fn sign_up_or_log_in_discards_the_token_when_the_exchanged_id_token_is_for_another_user() {
+    async fn sign_up_or_log_in_discards_the_token_when_the_exchanged_id_token_is_for_another_user()
+    {
         let (client, identity_token, transport) =
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-2");
 
@@ -1535,13 +1560,10 @@ mod tests {
         async fn too_early_ticks_never_refetch_and_stay_near_refresh_interval() {
             let transport = FakeAppleTransport::new(jwks_body_including(TEST_KID), "");
             let config = VerificationConfig::default(); // 6h refresh_interval
-            let client = AppleAuthClient::with_transport(
-                test_token_config(),
-                config,
-                transport.clone(),
-            )
-            .expect("valid test key should construct client")
-            .without_background_refresh();
+            let client =
+                AppleAuthClient::with_transport(test_token_config(), config, transport.clone())
+                    .expect("valid test key should construct client")
+                    .without_background_refresh();
 
             let recorded = Arc::new(StdMutex::new(Vec::new()));
             recording_loop(client, 5, recorded.clone()).await;
@@ -1564,13 +1586,10 @@ mod tests {
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_secs(3600),
             };
-            let client = AppleAuthClient::with_transport(
-                test_token_config(),
-                config,
-                transport.clone(),
-            )
-            .expect("valid test key should construct client")
-            .without_background_refresh();
+            let client =
+                AppleAuthClient::with_transport(test_token_config(), config, transport.clone())
+                    .expect("valid test key should construct client")
+                    .without_background_refresh();
 
             // With refresh_interval and cooldown_period both zero, every tick
             // refetches (no early-return, no cooldown skip) — without the
@@ -1600,13 +1619,10 @@ mod tests {
                 stale_key_grace_period: Duration::ZERO,
                 max_key_age: Duration::from_secs(3600),
             };
-            let client = AppleAuthClient::with_transport(
-                test_token_config(),
-                config,
-                transport.clone(),
-            )
-            .expect("valid test key should construct client")
-            .without_background_refresh();
+            let client =
+                AppleAuthClient::with_transport(test_token_config(), config, transport.clone())
+                    .expect("valid test key should construct client")
+                    .without_background_refresh();
 
             // Real tokio::time::sleep and real time throughout: this test is
             // measuring that the task actually stops running, which a fake,

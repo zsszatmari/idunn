@@ -468,7 +468,10 @@ mod tests {
 
         let suggested_wait = store.refresh_keystore().await;
 
-        assert_eq!(suggested_wait, VerificationConfig::default().refresh_interval);
+        assert_eq!(
+            suggested_wait,
+            VerificationConfig::default().refresh_interval
+        );
         assert_eq!(transport.call_count(), 1);
     }
 

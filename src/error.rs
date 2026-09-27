@@ -235,7 +235,9 @@ pub enum SignInError {
     /// code paired with this identity token, possibly a malicious client. That user's refresh
     /// token was discarded: revoking would end their whole authorization of this app. Nothing
     /// is left for the caller to do. See docs/architecture.md.
-    #[error("the exchanged id_token is for a different Apple user than the identity token; its refresh token was discarded")]
+    #[error(
+        "the exchanged id_token is for a different Apple user than the identity token; its refresh token was discarded"
+    )]
     SubjectMismatch,
     /// Rejected after the exchange: the refresh token Apple issued is live, and
     /// `sign_up_or_log_in` deliberately did not revoke it. See
