@@ -1,12 +1,13 @@
 use crate::identity_verification::AppleIdentity;
 use crate::token_exchange::RefreshToken;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Error verifying an Apple identity token — returned by
 /// `AppleAuthClient::verify_identity_token`, and embedded in
 /// `CodeExchangeError::ExchangedTokenUnverified` when it's the `id_token` from a
 /// token exchange that fails verification instead.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum VerificationError {
     /// The token is confirmed invalid — see `cause` for specifics.
     #[error("invalid Apple identity token: {0}")]
@@ -20,7 +21,7 @@ pub enum VerificationError {
 }
 
 /// Why an Apple identity token was found to be invalid.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum InvalidTokenCause {
     /// The token's `kid` is missing from its header, or isn't in Apple's
     /// currently published (successfully fetched, fresh) key set.
@@ -159,11 +160,12 @@ pub enum CodeExchangeError {
 }
 
 /// Why `AppleAuthClient::sign_up_or_log_in` rejected a sign-in *after* the
-/// authorization code was already exchanged for a live refresh token — this
-/// now describes why we rejected the sign-in after an exchange whose token
-/// (to idunn's best knowledge) belongs to the caller's own Apple user; see
-/// `SignInError::RevocationRequired`.
-#[derive(Debug, Error)]
+/// authorization code was already exchanged for a live refresh token, whose
+/// owner (to idunn's best knowledge) is the caller's own Apple user; see
+/// `SignInError::RejectedAfterExchange`. Carried twice: once in the
+/// `PendingRevocation` handed to `schedule_revocation`, once in
+/// `SignInError::RejectedAfterExchange`.
+#[derive(Debug, Clone, Error)]
 pub enum PostExchangeRejection {
     /// Apple's token endpoint exchanged the code, but the `id_token` it returned
     /// alongside failed verification.
@@ -174,18 +176,15 @@ pub enum PostExchangeRejection {
     NonceMismatch,
 }
 
-/// A refresh token Apple issued that `sign_up_or_log_in` deliberately left
-/// unrevoked — see [`super::AppleAuthClient::sign_up_or_log_in`] and
+/// A live refresh token that `sign_up_or_log_in` rejected after the
+/// exchange and handed to the host's `schedule_revocation` hook, awaiting
+/// it before returning `SignInError::RejectedAfterExchange` — see
 /// docs/architecture.md, "Why revocations are coordinated by the host,
-/// through `account_lookup`", for why idunn itself never calls
-/// `revoke_refresh_token` here. The revocation is the host's job, to be run
-/// after this call returns — possibly for several tokens in sequence,
-/// coordinated per docs/usage.md, "The `account_lookup` contract". Carried by
-/// `SignInError::RevocationRequired`.
-#[derive(Debug, Error)]
-#[error(
-    "sign-in rejected after the authorization code was exchanged; the refresh token is live and the caller must revoke it"
-)]
+/// through `account_lookup`", and "Why a post-exchange rejection goes
+/// through `schedule_revocation`". idunn never revokes it itself. The
+/// hook files it durably for later revocation, per docs/usage.md, "The
+/// `account_lookup` contract", obligation 5.
+#[derive(Debug)]
 pub struct PendingRevocation {
     pub refresh_token: RefreshToken,
     /// Comes from the caller's *own* identity token, verified before the
@@ -196,8 +195,14 @@ pub struct PendingRevocation {
     /// the exchanged token's owner could not be verified at all — see
     /// docs/architecture.md for the residual risk this carries.
     pub identity: AppleIdentity,
-    #[source]
     pub cause: PostExchangeRejection,
+    /// How long the host must wait, at minimum, before actually revoking
+    /// this token — gives a fast retry a chance to land in
+    /// `account_lookup` and cancel this pending revocation first (see
+    /// docs/usage.md, obligation 3). Fixed by idunn, not configurable;
+    /// add it to your own clock when filing the job (e.g. `NOW() +
+    /// grace_period` or your storage's equivalent).
+    pub grace_period: Duration,
 }
 
 /// Error from `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`.
@@ -234,11 +239,14 @@ pub enum SignInError<LookupErr, NonceErr = std::convert::Infallible> {
         "the exchanged id_token is for a different Apple user than the identity token; its refresh token was discarded"
     )]
     SubjectMismatch,
-    /// Rejected after the exchange: the refresh token Apple issued is live, and
-    /// `sign_up_or_log_in` deliberately did not revoke it. See
-    /// [`PendingRevocation`] for the obligation this carries.
-    #[error(transparent)]
-    RevocationRequired(Box<PendingRevocation>),
+    /// Rejected after the exchange for a reason in `PostExchangeRejection`: the
+    /// refresh token Apple issued is the caller's own and live, and idunn has
+    /// already handed it to `schedule_revocation` (and awaited it) before
+    /// returning this — nothing is left for the caller to do but answer the
+    /// request. Unlike `SubjectMismatch`, whose token belongs to another Apple
+    /// user and is discarded without ever calling the hook.
+    #[error("sign-in rejected after the authorization code was exchanged: {0}")]
+    RejectedAfterExchange(PostExchangeRejection),
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 ## Example
 
 ```rust
-use idunn::{AppleAuthClient, AppleTokenConfig, SignInError, SignInOutcome};
+use idunn::{AppleAuthClient, AppleTokenConfig, SignInOutcome};
 
 // Once, at startup. Clones are cheap and share the JWKS cache.
 let apple = AppleAuthClient::new(AppleTokenConfig {
@@ -19,7 +19,11 @@ let apple = AppleAuthClient::new(AppleTokenConfig {
 // Per sign-in. `identity_token` and `authorization_code` come from the app's
 // ASAuthorizationAppleIDCredential; `expected_nonce` is the single-use value
 // your server issued for this attempt.
-let outcome = match apple
+// `?` uses your `From<SignInError<LookupError>> for MyError`, where
+// LookupError is lookup_account's own error type. It matches every variant
+// with no wildcard: a variant added in a later idunn version won't compile
+// until you decide what it means.
+let outcome = apple
     .sign_up_or_log_in_with_nonce(
         &identity_token,
         &authorization_code,
@@ -29,21 +33,15 @@ let outcome = match apple
             // token is stored for this Apple user, NeedsExchange otherwise.
             lookup_account(&identity.apple_user_id).await
         },
+        |pending| async move {
+            // Apple issued a live token for a sign-in idunn then rejected.
+            // Store it durably for your revocation worker, not sooner than
+            // pending.grace_period from now; idunn awaits this before
+            // returning Err(SignInError::RejectedAfterExchange(_)).
+            schedule_revocation(pending).await
+        },
     )
-    .await
-{
-    Ok(outcome) => outcome,
-    Err(SignInError::RevocationRequired(pending)) => {
-        // Apple issued a live token for a sign-in idunn then rejected:
-        // queue pending.refresh_token for revocation, never just drop it.
-        return Err(MyError::SignInRejected);
-    }
-    // Your `From<SignInError<LookupError>> for MyError`, where LookupError is
-    // lookup_account's own error type, matches every variant with no
-    // wildcard: a variant added in a later idunn version won't compile until
-    // you decide what it means.
-    Err(err) => return Err(err.into()),
-};
+    .await?;
 
 match outcome {
     SignInOutcome::LoggedIn { identity } => {
@@ -59,7 +57,7 @@ match outcome {
 apple.revoke_refresh_token(&stored_refresh_token).await?;
 ```
 
-What `lookup_account` must guarantee, and how to run the revocation queue, is described in [docs/usage.md](docs/usage.md), "The `account_lookup` contract".
+What `lookup_account` and `schedule_revocation` must guarantee, and how to run the revocation queue, is described in [docs/usage.md](docs/usage.md), "The `account_lookup` contract".
 
 ## Highlights 
 

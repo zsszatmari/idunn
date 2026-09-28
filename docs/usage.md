@@ -29,15 +29,15 @@ let client = AppleAuthClient::new(token_config)?.without_background_refresh();
 
 ## Signing in: `sign_up_or_log_in`
 
-Each call runs, in order: verify the identity token, call `nonce_checker`, call `account_lookup`, and — only when `account_lookup` reports `AccountState::NeedsExchange` — exchange the authorization code, check the exchanged token's subject against the identity token's, then compare the exchanged token's nonce against the identity token's already-accepted nonce. `nonce_checker` itself is called once, for the identity token only.
+Each call runs, in order: verify the identity token, call `nonce_checker`, call `account_lookup`, and — only when `account_lookup` reports `AccountState::NeedsExchange` — exchange the authorization code, check the exchanged token's subject against the identity token's, then compare the exchanged token's nonce against the identity token's already-accepted nonce. `nonce_checker` itself is called once, for the identity token only. If the rejection happens after the exchange for any reason other than the subject check, idunn hands the live token to `schedule_revocation`, awaits it, then returns `RejectedAfterExchange`; the subject check discards the token instead and never calls the hook.
 
 | Outcome | What the host does |
 |---|---|
 | `Ok(SignInOutcome::LoggedIn { .. })` | No code was spent and no new token issued. Keep using the refresh token already on file. |
 | `Ok(SignInOutcome::SignedUp { refresh_token, .. })` | Persist `refresh_token`, keyed by `identity.apple_user_id`. This is the token account deletion later revokes (TN3194). If a stale token was already stored, overwrite it — do not revoke it. |
 | `Err(SignInError::IdentityTokenRejected)`, `Err(SignInError::NonceMismatch)`, `Err(SignInError::NonceCheckFailed)`, `Err(SignInError::AccountLookupFailed)`, `Err(SignInError::Exchange(_))` | Nothing was left live at Apple, so the host has no revocation obligation. The sign-in can be retried. `Exchange` may mean the code was already spent even though the call failed. |
-| `Err(SignInError::SubjectMismatch)` | Nothing to do — the token belongs to another Apple user and was discarded, never persisted. Worth logging as a security event. |
-| `Err(SignInError::RevocationRequired(pending))` | A refresh token is live at Apple. File a pending revocation — see "The `account_lookup` contract" below. |
+| `Err(SignInError::SubjectMismatch)` | Nothing to do — the token belongs to another Apple user and was discarded, never persisted. Worth logging as a security event. `schedule_revocation` is not called. |
+| `Err(SignInError::RejectedAfterExchange(cause))` | A refresh token was left live at Apple; idunn already handed it to your schedule_revocation hook and awaited it before returning. Nothing left to do — answer it as a rejected sign-in. cause says why. |
 
 `SignInError` is exhaustive: match its variants without a wildcard, so that a failure mode added in a later idunn version fails to compile in your code rather than falling into a default branch. Payloads you treat uniformly, such as the `AppleErrorCode` inside `Exchange(TokenExchangeFailed(code))`, can be bound whole. See docs/architecture.md, "Why the error enums are exhaustive".
 
@@ -55,7 +55,7 @@ Each call runs, in order: verify the identity token, call `nonce_checker`, call 
 
 4. **Per-user serialization.** The cancellation in `account_lookup`, the revocation worker, and the host's own explicit revocations (account deletion, an aborted signup) must not race each other for the same `apple_user_id`. The exact mechanism is a storage choice — what matters is that all three paths serialize through one point per user, so the worker's read-then-`revoke_refresh_token` sequence can check the pending job still exists immediately before it acts, with nothing able to cancel it in the gap. Give a worker's claim on a job an expiry: once it lapses, another worker can pick the job back up, which keeps a crashed worker from stalling the queue indefinitely.
 
-5. **Filing a `RevocationRequired` token.** Store it durably, outbox-style: `p.identity.apple_user_id`, the token (encrypted at rest), `p.cause`, and a timestamp. A worker retries `revoke_refresh_token` with backoff. Refresh tokens don't expire on a timer, so a revoke that succeeds days later still works.
+5. **Filing a pending revocation via `schedule_revocation`.** idunn calls it with a `PendingRevocation` `p` when it rejects a sign-in after the exchange. Store it durably, outbox-style: `p.identity.apple_user_id`, `p.refresh_token` (encrypted at rest), `p.cause`, and `p.grace_period` — for example as `NOW() + p.grace_period` for the earliest revoke time — and do not revoke inline (see obligation 3). idunn awaits the hook before returning, so return once the job is stored. It returns `()`: if storing fails, log it — idunn cannot take the token back. A worker retries `revoke_refresh_token` with backoff no sooner than that earliest time. Refresh tokens don't expire on a timer, so a revoke that succeeds days later still works.
    - Retrying is safe: idunn reports Apple's `invalid_grant` answer as `Ok(())` — already invalid.
    - Transient-looking failures: `TokenRevocationError::NetworkError`, and `TokenRevocationFailed(AppleErrorCode::UnknownError(_))`. idunn doesn't expose the HTTP status, so a 5xx with an unparseable body arrives here.
    - Configuration errors, permanent until fixed: `TokenRevocationFailed(AppleErrorCode::InvalidClient)` and `ClientSecretSigningFailed`. Alert on these — retrying won't help.

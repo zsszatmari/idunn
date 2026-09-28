@@ -51,7 +51,7 @@ fn error_enums_can_be_matched_without_a_wildcard() {
         | SignInError::AccountLookupFailed(_)
         | SignInError::Exchange(_)
         | SignInError::SubjectMismatch
-        | SignInError::RevocationRequired(_) => {}
+        | SignInError::RejectedAfterExchange(_) => {}
     };
     // A `sign_up_or_log_in_with_nonce` result: `NonceErr` defaults to
     // `Infallible`, so a by-value match may leave `NonceCheckFailed` out.
@@ -61,6 +61,6 @@ fn error_enums_can_be_matched_without_a_wildcard() {
         | SignInError::AccountLookupFailed(_)
         | SignInError::Exchange(_)
         | SignInError::SubjectMismatch
-        | SignInError::RevocationRequired(_) => {}
+        | SignInError::RejectedAfterExchange(_) => {}
     };
 }
