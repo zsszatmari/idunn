@@ -72,4 +72,5 @@ Guidelines for the change itself:
 
 CI (`.github/workflows/ci.yml`) runs these checks through the same `just`
 recipes, plus the full feature powerset and a minimal-dependency-versions
-build; the live Apple contract tests are not part of PR CI.
+build; the live Apple contract tests are not part of PR CI (they run weekly
+via `.github/workflows/live-apple.yml`).
