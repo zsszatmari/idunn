@@ -4,6 +4,17 @@
 // https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
 // https://developer.apple.com/support/offering-account-deletion-in-your-app/
 
+// jsonwebtoken can't auto-select a CryptoProvider when both backends are enabled, and has
+// none to use when neither is: either case panics at first use rather than failing to build.
+// See "Why exactly one crypto backend is enforced at compile time" in docs/architecture.md.
+#[cfg(all(feature = "aws_lc_rs", feature = "rust_crypto"))]
+compile_error!(
+    "features \"aws_lc_rs\" and \"rust_crypto\" are mutually exclusive: enable exactly one \
+     (to use rust_crypto, set default-features = false)"
+);
+#[cfg(not(any(feature = "aws_lc_rs", feature = "rust_crypto")))]
+compile_error!("one of the \"aws_lc_rs\" or \"rust_crypto\" features must be enabled");
+
 mod config;
 mod error;
 mod identity_verification;

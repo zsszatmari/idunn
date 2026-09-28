@@ -47,9 +47,9 @@ see the `justfile` for the full list.
 
 ```sh
 cargo test                # tests (dev-dependencies force the `reqwest` feature on)
-just clippy               # clippy over all targets and features, warnings denied
+just clippy               # clippy over all targets and non-crypto features, warnings denied
 cargo fmt --all           # formatting
-just check-features       # every feature in isolation still compiles
+just check-features       # each crypto backend compiles
 just cargo-deny           # license / advisory / source checks
 just coverage             # local HTML coverage report
 cargo test -- --ignored real_apple  # live Apple contract tests (network)
