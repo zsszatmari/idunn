@@ -144,6 +144,31 @@ impl SignInOutcome {
     }
 }
 
+/// The host's account storage, as `sign_up_or_log_in` sees it: both storage
+/// hooks of a sign-in, on one type. The obligations are in docs/usage.md,
+/// "The `AppleAccounts` contract"; the reasoning in docs/architecture.md,
+/// "Why the account hooks are one `AppleAccounts` trait". Implement it with
+/// `async fn`.
+pub trait AppleAccounts: Sync {
+    /// Returned unchanged as `SignInError::AccountLookupFailed`.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Whether a usable refresh token is on file for `identity`. Called at
+    /// most once, after the identity token and its nonce are verified and
+    /// before the authorization code is spent (contract obligations 1-4).
+    fn lookup(
+        &self,
+        identity: &AppleIdentity,
+    ) -> impl Future<Output = Result<AccountState, Self::Error>> + Send;
+
+    /// Files a live refresh token idunn rejected after the exchange, for
+    /// revocation no sooner than `pending.grace_period` from now (obligation
+    /// 5). Awaited before `sign_up_or_log_in` returns
+    /// `SignInError::RejectedAfterExchange`; a failure to file is the
+    /// implementation's own to log.
+    fn schedule_revocation(&self, pending: PendingRevocation) -> impl Future<Output = ()> + Send;
+}
+
 /// The credential material for signing client secrets: the config and the
 /// `EncodingKey` derived from its `.p8` key. Grouped behind one `Arc` so
 /// `AppleAuthClient::clone` never re-allocates or copies the private key
@@ -279,7 +304,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         }
     }
 
-    /// Verifies an identity token, checks the caller's `account_lookup` for
+    /// Verifies an identity token, checks the caller's `accounts.lookup` for
     /// whether this Apple user already has a usable refresh token on file,
     /// and either returns a login (no authorization code spent) or exchanges
     /// the code and checks that both tokens agree on the nonce and the Apple
@@ -296,7 +321,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// docs/architecture.md, "Why the exchanged nonce is compared against the
     /// identity token's".
     ///
-    /// `account_lookup` runs after the identity token and its nonce are
+    /// `accounts.lookup` runs after the identity token and its nonce are
     /// verified, but before anything is spent at Apple — it decides whether
     /// `sign_up_or_log_in` exchanges the authorization code at all.
     /// `AccountState::AlreadyOnFile` returns `SignInOutcome::LoggedIn`
@@ -317,39 +342,36 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// A post-exchange rejection where the exchanged `id_token` names a
     /// different Apple user than the caller's identity token returns
     /// `SignInError::SubjectMismatch`: the token is simply discarded, and
-    /// `schedule_revocation` is never called. Every other post-exchange
+    /// `accounts.schedule_revocation` is never called. Every other post-exchange
     /// rejection (`PostExchangeRejection`: the exchanged `id_token` fails
     /// verification, or its nonce doesn't match) hands a [`PendingRevocation`]
     /// — the token, the verified identity, the cause, and a fixed
-    /// `grace_period` — to `schedule_revocation`, awaits it, and only then
+    /// `grace_period` — to `accounts.schedule_revocation`, awaits it, and only then
     /// returns `SignInError::RejectedAfterExchange(cause)`. The hook must file
     /// the token durably rather than revoke it inline, per docs/usage.md, "The
-    /// `account_lookup` contract"; it returns `()` — a failure to file is the
+    /// `AppleAccounts` contract"; it returns `()` — a failure to file is the
     /// hook's own to log. The reasoning is in docs/architecture.md, "Why
     /// `sign_up_or_log_in` never revokes, and discards another user's token"
     /// and "Why a post-exchange rejection goes through `schedule_revocation`";
-    /// why a stale/unusable token reported by `account_lookup` is simply
+    /// why a stale/unusable token reported by `accounts.lookup` is simply
     /// discarded is covered separately in docs/architecture.md, "Why a stale
     /// refresh token is discarded, not revoked".
     // See docs/architecture.md: "Why sign_up_or_log_in's nonce checker is
-    // `FnOnce(Option<String>) -> Fut`, not `AsyncFn`" — `account_lookup` and
-    // `schedule_revocation` follow the same reasoning; all three are `FnOnce`
-    // since each is called at most once.
-    pub async fn sign_up_or_log_in<F, Fut, L, LFut, Q, QFut, NonceErr, LookupErr>(
+    // `FnOnce(Option<String>) -> Fut`, not `AsyncFn`" — only `nonce_checker`
+    // follows that reasoning. The two storage hooks are `AppleAccounts`
+    // methods, see "Why the account hooks are one `AppleAccounts` trait".
+    pub async fn sign_up_or_log_in<F, Fut, A, NonceErr>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         nonce_checker: F,
-        account_lookup: L,
-        schedule_revocation: Q,
-    ) -> Result<SignInOutcome, SignInError<LookupErr, NonceErr>>
+        accounts: &A,
+    ) -> Result<SignInOutcome, SignInError<A::Error, NonceErr>>
     where
         F: FnOnce(Option<String>) -> Fut,
         Fut: Future<Output = Result<bool, NonceErr>> + Send,
-        L: FnOnce(AppleIdentity) -> LFut,
-        LFut: Future<Output = Result<AccountState, LookupErr>> + Send,
-        Q: FnOnce(PendingRevocation) -> QFut,
-        QFut: Future<Output = ()> + Send,
+        A: AppleAccounts,
+        NonceErr: std::error::Error + Send + Sync + 'static,
     {
         let verified = self.verify_identity_token(identity_token).await?;
         match nonce_checker(verified.nonce.clone()).await {
@@ -358,7 +380,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
             Err(cause) => return Err(SignInError::NonceCheckFailed(cause)),
         }
 
-        match account_lookup(verified.identity.clone()).await {
+        match accounts.lookup(&verified.identity).await {
             Ok(AccountState::AlreadyOnFile) => {
                 return Ok(SignInOutcome::LoggedIn {
                     identity: verified.identity,
@@ -376,7 +398,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
                 cause,
             }) => {
                 return Err(reject_after_exchange(
-                    schedule_revocation,
+                    accounts,
                     refresh_token,
                     verified.identity,
                     PostExchangeRejection::TokenUnverified(cause),
@@ -402,7 +424,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         };
         if !nonces_match {
             return Err(reject_after_exchange(
-                schedule_revocation,
+                accounts,
                 details.refresh_token,
                 verified.identity,
                 PostExchangeRejection::NonceMismatch,
@@ -488,27 +510,24 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
 /// The refresh token is live at Apple and deliberately left unrevoked —
 /// revoking is authorization-scoped and could tear down a concurrent
 /// sign-in for the same Apple user (docs/architecture.md, "Why
-/// revocations are coordinated by the host, through `account_lookup`").
-/// It goes to the host's `schedule_revocation` instead, awaited before the
-/// error is returned, so the error itself carries no token to lose — see
-/// "Why a post-exchange rejection goes through `schedule_revocation`".
-async fn reject_after_exchange<Q, QFut, LookupErr, NonceErr>(
-    schedule_revocation: Q,
+/// revocations are coordinated by the host, through `AppleAccounts`").
+/// It goes to the host's `AppleAccounts::schedule_revocation` instead, awaited
+/// before the error is returned, so the error itself carries no token to lose
+/// — see "Why a post-exchange rejection goes through `schedule_revocation`".
+async fn reject_after_exchange<A: AppleAccounts, NonceErr>(
+    accounts: &A,
     refresh_token: RefreshToken,
     identity: AppleIdentity,
     cause: PostExchangeRejection,
-) -> SignInError<LookupErr, NonceErr>
-where
-    Q: FnOnce(PendingRevocation) -> QFut,
-    QFut: Future<Output = ()> + Send,
-{
-    schedule_revocation(PendingRevocation {
-        refresh_token,
-        identity,
-        cause: cause.clone(),
-        grace_period: REVOCATION_GRACE_PERIOD,
-    })
-    .await;
+) -> SignInError<A::Error, NonceErr> {
+    accounts
+        .schedule_revocation(PendingRevocation {
+            refresh_token,
+            identity,
+            cause: cause.clone(),
+            grace_period: REVOCATION_GRACE_PERIOD,
+        })
+        .await;
     SignInError::RejectedAfterExchange(cause)
 }
 
@@ -668,30 +687,22 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     ///         Some(nonce) => Ok(nonce == expected_nonce),
     ///         None => Ok(my_replay_store.check_and_record(identity_token).await),
     ///     }
-    /// }, account_lookup, schedule_revocation).await
+    /// }, &accounts).await
     /// ```
-    pub async fn sign_up_or_log_in_with_nonce<L, LFut, Q, QFut, LookupErr>(
+    pub async fn sign_up_or_log_in_with_nonce<A: AppleAccounts>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         expected_nonce: &str,
-        account_lookup: L,
-        schedule_revocation: Q,
-    ) -> Result<SignInOutcome, SignInError<LookupErr>>
-    where
-        L: FnOnce(AppleIdentity) -> LFut,
-        LFut: Future<Output = Result<AccountState, LookupErr>> + Send,
-        Q: FnOnce(PendingRevocation) -> QFut,
-        QFut: Future<Output = ()> + Send,
-    {
+        accounts: &A,
+    ) -> Result<SignInOutcome, SignInError<A::Error>> {
         self.sign_up_or_log_in(
             identity_token,
             authorization_code,
             move |candidate| async move {
                 Ok::<_, std::convert::Infallible>(nonce_eq(candidate.as_deref(), expected_nonce))
             },
-            account_lookup,
-            schedule_revocation,
+            accounts,
         )
         .await
     }
@@ -1114,51 +1125,69 @@ mod tests {
         (client, identity_token, transport)
     }
 
-    /// Stand-ins for a host's own `account_lookup` / `nonce_checker` error types.
-    /// Distinct types, so a test that mixes the two up fails to compile.
-    #[derive(Debug, PartialEq, Eq)]
+    /// Stand-ins for a host's own `AppleAccounts::Error` / `nonce_checker` error
+    /// types. Distinct types, so a test that mixes the two up fails to compile.
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+    #[error("{0}")]
     struct LookupFailure(&'static str);
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+    #[error("{0}")]
     struct NonceStoreFailure(&'static str);
 
-    /// Lookup that always reports no usable account on file, so a test exercises
-    /// the full exchange path — the behaviour the pre-lookup `sign_in` always had.
-    fn needs_exchange()
-    -> impl FnOnce(AppleIdentity) -> std::future::Ready<Result<AccountState, LookupFailure>> {
-        |_identity| std::future::ready(Ok(AccountState::NeedsExchange))
+    /// Test double for a host's `AppleAccounts`. `lookup` answers with a fixed
+    /// result. Scheduling panics unless `recording_revocations()` enabled it, so
+    /// a regression that schedules where it shouldn't fails loudly. Both methods
+    /// yield once before acting: a test inspecting `scheduled()` after the call
+    /// proves idunn awaited the hook, and the futures hold `&self` across an
+    /// await, which is the case the `*_future_is_send` guards need to cover.
+    struct TestAccounts {
+        lookup: Result<AccountState, LookupFailure>,
+        scheduled: Option<StdMutex<Vec<PendingRevocation>>>,
     }
 
-    /// `schedule_revocation` for every path where idunn must not schedule
-    /// anything — every outcome except `RejectedAfterExchange`. Panics on a
-    /// call, so a regression that starts scheduling where it shouldn't fails
-    /// the test loudly.
-    fn never_schedules_a_revocation() -> impl FnOnce(PendingRevocation) -> std::future::Ready<()> {
-        |pending| panic!("unexpected schedule_revocation call: {:?}", pending.cause)
-    }
+    impl TestAccounts {
+        /// No usable account on file, so a test exercises the full exchange path.
+        fn needs_exchange() -> Self {
+            Self::with_lookup(Ok(AccountState::NeedsExchange))
+        }
 
-    /// Records every `PendingRevocation` idunn hands to `schedule_revocation`.
-    /// `hook()` yields once before recording, so a test that inspects `take()`
-    /// after the call returns proves idunn actually *awaited* the hook, not
-    /// just polled it once.
-    #[derive(Clone, Default)]
-    struct ScheduledRevocations(Arc<StdMutex<Vec<PendingRevocation>>>);
-
-    impl ScheduledRevocations {
-        fn hook(
-            &self,
-        ) -> impl FnOnce(PendingRevocation) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + use<>
-        {
-            let scheduled = self.0.clone();
-            move |pending| {
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    scheduled.lock().unwrap().push(pending);
-                })
+        fn with_lookup(lookup: Result<AccountState, LookupFailure>) -> Self {
+            Self {
+                lookup,
+                scheduled: None,
             }
         }
 
-        fn take(&self) -> Vec<PendingRevocation> {
-            std::mem::take(&mut *self.0.lock().unwrap())
+        fn recording_revocations(self) -> Self {
+            Self {
+                scheduled: Some(StdMutex::default()),
+                ..self
+            }
+        }
+
+        fn scheduled(&self) -> Vec<PendingRevocation> {
+            let scheduled = self
+                .scheduled
+                .as_ref()
+                .expect("recording_revocations() not enabled");
+            std::mem::take(&mut *scheduled.lock().unwrap())
+        }
+    }
+
+    impl AppleAccounts for TestAccounts {
+        type Error = LookupFailure;
+
+        async fn lookup(&self, _identity: &AppleIdentity) -> Result<AccountState, LookupFailure> {
+            tokio::task::yield_now().await;
+            self.lookup.clone()
+        }
+
+        async fn schedule_revocation(&self, pending: PendingRevocation) {
+            tokio::task::yield_now().await;
+            match &self.scheduled {
+                Some(scheduled) => scheduled.lock().unwrap().push(pending),
+                None => panic!("unexpected schedule_revocation call: {:?}", pending.cause),
+            }
         }
     }
 
@@ -1179,27 +1208,28 @@ mod tests {
     /// required by `Send`-bound callers such as axum handlers.
     #[test]
     fn sign_up_or_log_in_with_nonce_future_is_send() {
-        let (client, identity_token, _transport) =
-            client_for_sign_up_or_log_in("nonce", "apple-user-1");
+        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
+        let accounts = TestAccounts::needs_exchange();
         assert_send(client.sign_up_or_log_in_with_nonce(
             &identity_token,
             "auth-code",
             "nonce",
-            needs_exchange(),
-            never_schedules_a_revocation(),
+            &accounts,
         ));
     }
 
     /// Guards that `sign_up_or_log_in`'s future stays `Send` for any checker
     /// closure that itself returns a `Send` future, as required by `Send`-bound
-    /// callers such as axum handlers. Uses a real boxed `schedule_revocation`
-    /// hook (not the trivial `Ready<()>` case) so this guard also covers that
-    /// hook's contribution to the overall future's `Send`-ness.
+    /// callers such as axum handlers. `TestAccounts` implements `AppleAccounts`
+    /// with `async fn`s that hold `&self` across an await, so this guard also
+    /// covers the `AppleAccounts` futures' contribution to the overall future's
+    /// `Send`-ness.
     #[test]
     fn sign_up_or_log_in_future_is_send() {
         let (client, identity_token, _transport) =
             client_for_sign_up_or_log_in("nonce", "apple-user-1");
         let expected = String::from("nonce");
+        let accounts = TestAccounts::needs_exchange();
         assert_send(client.sign_up_or_log_in(
             &identity_token,
             "auth-code",
@@ -1209,8 +1239,7 @@ mod tests {
                     Ok::<bool, std::convert::Infallible>(candidate.as_deref() == Some(expected.as_str()))
                 }
             },
-            needs_exchange(),
-            ScheduledRevocations::default().hook(),
+            &accounts,
         ));
     }
 
@@ -1236,8 +1265,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await
             .unwrap();
@@ -1285,8 +1313,7 @@ mod tests {
                         Ok::<bool, std::convert::Infallible>(removed)
                     }
                 },
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await
             .unwrap();
@@ -1306,8 +1333,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 |_candidate| async move { Ok::<bool, std::convert::Infallible>(true) },
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await
             .unwrap();
@@ -1322,15 +1348,14 @@ mod tests {
     async fn permissive_sign_up_or_log_in_rejects_an_exchanged_nonce_the_identity_token_lacked() {
         let (client, identity_token, _transport) =
             permissive_client_for_sign_up_or_log_in(None, Some("some-nonce"), "apple-user-1");
-        let scheduled = ScheduledRevocations::default();
+        let accounts = TestAccounts::needs_exchange().recording_revocations();
 
         let result = client
             .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 |_candidate| async move { Ok::<bool, std::convert::Infallible>(true) },
-                needs_exchange(),
-                scheduled.hook(),
+                &accounts,
             )
             .await;
 
@@ -1338,7 +1363,7 @@ mod tests {
             result,
             Err(SignInError::RejectedAfterExchange(PostExchangeRejection::NonceMismatch))
         ));
-        let jobs = scheduled.take();
+        let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
         assert!(matches!(jobs[0].cause, PostExchangeRejection::NonceMismatch));
     }
@@ -1357,8 +1382,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "wrong-nonce",
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await;
 
@@ -1370,7 +1394,7 @@ mod tests {
     /// that `sign_up_or_log_in` hands to `schedule_revocation`, and awaits,
     /// before returning — no revoke attempt — for the host to revoke after
     /// the call returns. See docs/architecture.md, "Why revocations are
-    /// coordinated by the host, through `account_lookup`".
+    /// coordinated by the host, through `AppleAccounts`".
     #[tokio::test]
     async fn sign_up_or_log_in_schedules_revocation_for_an_unverifiable_exchanged_token() {
         let config = test_token_config();
@@ -1382,15 +1406,14 @@ mod tests {
         let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
             .expect("valid test key should construct client")
             .without_background_refresh();
-        let scheduled = ScheduledRevocations::default();
+        let accounts = TestAccounts::needs_exchange().recording_revocations();
 
         let result = client
             .sign_up_or_log_in_with_nonce(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                needs_exchange(),
-                scheduled.hook(),
+                &accounts,
             )
             .await;
 
@@ -1398,7 +1421,7 @@ mod tests {
             result,
             Err(SignInError::RejectedAfterExchange(PostExchangeRejection::TokenUnverified(_)))
         ));
-        let jobs = scheduled.take();
+        let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].refresh_token.as_str(), "rt");
         assert_eq!(jobs[0].identity.apple_user_id, "apple-user-1");
@@ -1413,15 +1436,14 @@ mod tests {
     async fn sign_up_or_log_in_schedules_revocation_when_the_exchanged_nonce_does_not_match() {
         let (client, identity_token, transport) =
             client_for_sign_up_or_log_in("a-different-nonce", "apple-user-1");
-        let scheduled = ScheduledRevocations::default();
+        let accounts = TestAccounts::needs_exchange().recording_revocations();
 
         let result = client
             .sign_up_or_log_in_with_nonce(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                needs_exchange(),
-                scheduled.hook(),
+                &accounts,
             )
             .await;
 
@@ -1429,7 +1451,7 @@ mod tests {
             result,
             Err(SignInError::RejectedAfterExchange(PostExchangeRejection::NonceMismatch))
         ));
-        let jobs = scheduled.take();
+        let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].refresh_token.as_str(), "rt");
         assert!(matches!(jobs[0].cause, PostExchangeRejection::NonceMismatch));
@@ -1456,8 +1478,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await;
 
@@ -1481,8 +1502,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await;
 
@@ -1503,8 +1523,7 @@ mod tests {
                 |_candidate| async move {
                     Err::<bool, _>(NonceStoreFailure("session store unavailable"))
                 },
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await;
 
@@ -1527,8 +1546,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "EXPECTED-NONCE",
-                needs_exchange(),
-                never_schedules_a_revocation(),
+                &TestAccounts::needs_exchange(),
             )
             .await;
 
@@ -1545,8 +1563,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                |_identity| async move { Ok::<_, LookupFailure>(AccountState::AlreadyOnFile) },
-                never_schedules_a_revocation(),
+                &TestAccounts::with_lookup(Ok(AccountState::AlreadyOnFile)),
             )
             .await
             .unwrap();
@@ -1570,10 +1587,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
-                |_identity| async move {
-                    Err::<AccountState, _>(LookupFailure("account store unavailable"))
-                },
-                never_schedules_a_revocation(),
+                &TestAccounts::with_lookup(Err(LookupFailure("account store unavailable"))),
             )
             .await;
 

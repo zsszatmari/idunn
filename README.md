@@ -5,7 +5,10 @@
 ## Example
 
 ```rust
-use idunn::{AppleAuthClient, AppleTokenConfig, SignInOutcome};
+use idunn::{
+    AccountState, AppleAccounts, AppleAuthClient, AppleIdentity, AppleTokenConfig, PendingRevocation,
+    SignInOutcome,
+};
 
 // Once, at startup. Clones are cheap and share the JWKS cache.
 let apple = AppleAuthClient::new(AppleTokenConfig {
@@ -16,11 +19,29 @@ let apple = AppleAuthClient::new(AppleTokenConfig {
 })?
 .with_background_refresh(tokio::runtime::Handle::current());
 
+// Your storage, once. idunn calls these during a sign-in.
+impl AppleAccounts for MyAccounts {
+    type Error = MyDbError;
+
+    async fn lookup(&self, identity: &AppleIdentity) -> Result<AccountState, MyDbError> {
+        // AccountState::AlreadyOnFile if a usable refresh token is stored for
+        // this Apple user, NeedsExchange otherwise.
+        self.lookup_account(&identity.apple_user_id).await
+    }
+
+    async fn schedule_revocation(&self, pending: PendingRevocation) {
+        // Apple issued a live token for a sign-in idunn then rejected. Store it
+        // durably for your revocation worker, not sooner than
+        // pending.grace_period from now.
+        self.file_revocation(pending).await
+    }
+}
+
 // Per sign-in. `identity_token` and `authorization_code` come from the app's
 // ASAuthorizationAppleIDCredential; `expected_nonce` is the single-use value
 // your server issued for this attempt.
-// `?` uses your `From<SignInError<LookupError>> for MyError`, where
-// LookupError is lookup_account's own error type. It matches every variant
+// `?` uses your `From<SignInError<MyDbError>> for MyError`, where
+// MyDbError is your `AppleAccounts::Error`. It matches every variant
 // with no wildcard: a variant added in a later idunn version won't compile
 // until you decide what it means.
 let outcome = apple
@@ -28,18 +49,7 @@ let outcome = apple
         &identity_token,
         &authorization_code,
         &expected_nonce,
-        |identity| async move {
-            // Your storage: AccountState::AlreadyOnFile if a usable refresh
-            // token is stored for this Apple user, NeedsExchange otherwise.
-            lookup_account(&identity.apple_user_id).await
-        },
-        |pending| async move {
-            // Apple issued a live token for a sign-in idunn then rejected.
-            // Store it durably for your revocation worker, not sooner than
-            // pending.grace_period from now; idunn awaits this before
-            // returning Err(SignInError::RejectedAfterExchange(_)).
-            schedule_revocation(pending).await
-        },
+        &accounts,
     )
     .await?;
 
@@ -57,7 +67,7 @@ match outcome {
 apple.revoke_refresh_token(&stored_refresh_token).await?;
 ```
 
-What `lookup_account` and `schedule_revocation` must guarantee, and how to run the revocation queue, is described in [docs/usage.md](docs/usage.md), "The `account_lookup` contract".
+What `lookup` and `schedule_revocation` must guarantee, and how to run the revocation queue, is described in [docs/usage.md](docs/usage.md), "The `AppleAccounts` contract".
 
 ## Highlights 
 
@@ -66,7 +76,7 @@ What `lookup_account` and `schedule_revocation` must guarantee, and how to run t
 - **Secrets that can't leak by accident.** Refresh tokens and private keys get hand-written, redacting `Debug` impls and zeroize-on-drop, so an `unwrap()` panic or a stray `{:?}` in a log line can't print a live credential.
 - **An injectable HTTP transport**, so you can bring your own HTTP client. reqwest is supported out of the box.
 
-What it deliberately does not do: store anything, decide who "owns" an Apple account, or coordinate concurrent sign-ins and revocations for the same user — that needs a shared view of your own application state, so it's your job, but it's guided by `account_lookup`. See [docs/usage.md](docs/usage.md) for that contract and [docs/architecture.md](docs/architecture.md) for the reasoning behind the crate's design.
+What it deliberately does not do: store anything, decide who "owns" an Apple account, or coordinate concurrent sign-ins and revocations for the same user — that needs a shared view of your own application state, so it's your job, but it's guided by the `AppleAccounts` trait you implement. See [docs/usage.md](docs/usage.md) for that contract and [docs/architecture.md](docs/architecture.md) for the reasoning behind the crate's design.
 
 ## Getting started
 

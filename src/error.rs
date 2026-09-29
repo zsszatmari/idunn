@@ -180,10 +180,10 @@ pub enum PostExchangeRejection {
 /// exchange and handed to the host's `schedule_revocation` hook, awaiting
 /// it before returning `SignInError::RejectedAfterExchange` — see
 /// docs/architecture.md, "Why revocations are coordinated by the host,
-/// through `account_lookup`", and "Why a post-exchange rejection goes
+/// through `AppleAccounts`", and "Why a post-exchange rejection goes
 /// through `schedule_revocation`". idunn never revokes it itself. The
 /// hook files it durably for later revocation, per docs/usage.md, "The
-/// `account_lookup` contract", obligation 5.
+/// `AppleAccounts` contract", obligation 5.
 #[derive(Debug)]
 pub struct PendingRevocation {
     pub refresh_token: RefreshToken,
@@ -198,7 +198,7 @@ pub struct PendingRevocation {
     pub cause: PostExchangeRejection,
     /// How long the host must wait, at minimum, before actually revoking
     /// this token — gives a fast retry a chance to land in
-    /// `account_lookup` and cancel this pending revocation first (see
+    /// `AppleAccounts::lookup` and cancel this pending revocation first (see
     /// docs/usage.md, obligation 3). Fixed by idunn, not configurable;
     /// add it to your own clock when filing the job (e.g. `NOW() +
     /// grace_period` or your storage's equivalent).
@@ -207,7 +207,7 @@ pub struct PendingRevocation {
 
 /// Error from `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`.
 /// `LookupErr` and `NonceErr` are the host's own error types, returned unchanged
-/// from `account_lookup` and `nonce_checker` — see docs/architecture.md, "Why
+/// from `AppleAccounts::lookup` and `nonce_checker` — see docs/architecture.md, "Why
 /// `SignInError` carries the host's own error types". `NonceErr` defaults to
 /// `Infallible`: `sign_up_or_log_in_with_nonce`'s built-in checker cannot fail.
 #[derive(Debug, Error)]
@@ -222,7 +222,7 @@ pub enum SignInError<LookupErr, NonceErr = std::convert::Infallible> {
     /// checker's own error, unchanged.
     #[error("the nonce check could not be completed: {0}")]
     NonceCheckFailed(NonceErr),
-    /// The caller's `account_lookup` failed (e.g. a database error). Says nothing
+    /// The caller's `AppleAccounts::lookup` failed (e.g. a database error). Says nothing
     /// about whether the account exists — a genuine lookup failure, not a
     /// negative result. Carries the lookup's own error, unchanged.
     #[error("the account lookup could not be completed: {0}")]
