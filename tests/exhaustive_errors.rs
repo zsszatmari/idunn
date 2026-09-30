@@ -1,10 +1,11 @@
-//! Compiles only while idunn's public error enums are exhaustive: a
-//! `#[non_exhaustive]` enum would force a wildcard arm on this crate-external
-//! code. See docs/architecture.md, "Why the error enums are exhaustive".
+//! Compiles only while idunn's public error enums, and `SignInErrorKind`, are
+//! exhaustive: a `#[non_exhaustive]` enum would force a wildcard arm on this
+//! crate-external code. See docs/architecture.md, "Why the error enums are
+//! exhaustive".
 
 use idunn::{
     AppleErrorCode, CodeExchangeError, InvalidTokenCause, PostExchangeRejection, SignInError,
-    TokenExchangeError, TokenRevocationError, VerificationError,
+    SignInErrorKind, TokenExchangeError, TokenRevocationError, VerificationError,
 };
 
 #[test]
@@ -44,23 +45,16 @@ fn error_enums_can_be_matched_without_a_wildcard() {
     let _: fn(&PostExchangeRejection) = |e| match e {
         PostExchangeRejection::TokenUnverified(_) | PostExchangeRejection::NonceMismatch => {}
     };
-    let _: fn(&SignInError<std::io::Error, std::fmt::Error>) = |e| match e {
+    let _: fn(&SignInError) = |e| match e {
         SignInError::IdentityTokenRejected(_)
         | SignInError::NonceMismatch
-        | SignInError::NonceCheckFailed(_)
-        | SignInError::AccountLookupFailed(_)
         | SignInError::Exchange(_)
         | SignInError::SubjectMismatch
         | SignInError::RejectedAfterExchange(_) => {}
     };
-    // A `sign_up_or_log_in_with_nonce` result: `NonceErr` defaults to
-    // `Infallible`, so a by-value match may leave `NonceCheckFailed` out.
-    let _: fn(SignInError<std::io::Error>) = |e| match e {
-        SignInError::IdentityTokenRejected(_)
-        | SignInError::NonceMismatch
-        | SignInError::AccountLookupFailed(_)
-        | SignInError::Exchange(_)
-        | SignInError::SubjectMismatch
-        | SignInError::RejectedAfterExchange(_) => {}
+    let _: fn(SignInErrorKind) = |kind| match kind {
+        SignInErrorKind::Rejected
+        | SignInErrorKind::Unavailable
+        | SignInErrorKind::Misconfigured => {}
     };
 }

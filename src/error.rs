@@ -205,28 +205,19 @@ pub struct PendingRevocation {
     pub grace_period: Duration,
 }
 
-/// Error from `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`.
-/// `LookupErr` and `NonceErr` are the host's own error types, returned unchanged
-/// from `AppleAccounts::lookup` and `nonce_checker` — see docs/architecture.md, "Why
-/// `SignInError` carries the host's own error types". `NonceErr` defaults to
-/// `Infallible`: `sign_up_or_log_in_with_nonce`'s built-in checker cannot fail.
+/// idunn's own reasons `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`
+/// failed. Those methods return the host's `AppleAccounts::Error`, which every
+/// host builds from this through `From<SignInError>`; the host's own hook
+/// failures (`AppleAccounts::lookup`, `nonce_checker`) never pass through here.
+/// [`SignInError::kind`] says how to answer each one. See docs/architecture.md,
+/// "Why sign-in returns the host's own error type".
 #[derive(Debug, Error)]
-pub enum SignInError<LookupErr, NonceErr = std::convert::Infallible> {
+pub enum SignInError {
     // --- BEFORE the exchange: nothing was spent at Apple, no token exists ---
     #[error(transparent)]
     IdentityTokenRejected(#[from] VerificationError),
     #[error("the identity token's nonce does not match the expected value")]
     NonceMismatch,
-    /// The nonce check itself could not be completed (e.g. the caller's session
-    /// lookup failed). This does *not* mean the nonce was wrong. Carries the
-    /// checker's own error, unchanged.
-    #[error("the nonce check could not be completed: {0}")]
-    NonceCheckFailed(NonceErr),
-    /// The caller's `AppleAccounts::lookup` failed (e.g. a database error). Says nothing
-    /// about whether the account exists — a genuine lookup failure, not a
-    /// negative result. Carries the lookup's own error, unchanged.
-    #[error("the account lookup could not be completed: {0}")]
-    AccountLookupFailed(LookupErr),
     #[error(transparent)]
     Exchange(#[from] TokenExchangeError),
 
@@ -247,6 +238,101 @@ pub enum SignInError<LookupErr, NonceErr = std::convert::Infallible> {
     /// user and is discarded without ever calling the hook.
     #[error("sign-in rejected after the authorization code was exchanged: {0}")]
     RejectedAfterExchange(PostExchangeRejection),
+}
+
+/// How to answer a failed sign-in — see [`SignInError::kind`]. Plain, not
+/// `#[non_exhaustive]`, like idunn's error enums: a new kind is a new decision
+/// for the host (a new class of response), so it should fail to compile until
+/// the host makes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInErrorKind {
+    /// The sign-in itself was refused: the identity token failed verification,
+    /// a nonce or Apple user didn't match, or Apple rejected the authorization
+    /// code (`invalid_grant`, `invalid_request`). Answer it as a failed login
+    /// (e.g. HTTP 401); resending the same request won't help.
+    Rejected,
+    /// Apple, or its published key set, couldn't be reached or gave an answer
+    /// idunn couldn't interpret — nothing is known to be wrong with the
+    /// request. Transient: answer e.g. HTTP 503. Resending the same request
+    /// only helps while the authorization code is unspent; once an exchange was
+    /// attempted, the client needs a fresh Apple authorization. A host that
+    /// maps only the kind can't tell which, so its client should restart.
+    Unavailable,
+    /// Apple refused this app's own credentials or client configuration
+    /// (`invalid_client`, `unauthorized_client`, `unsupported_grant_type`,
+    /// `invalid_scope`), or the client secret couldn't be signed. Neither the
+    /// caller's fault nor transient: answer e.g. HTTP 500 and alert — retrying
+    /// won't help until the configuration is fixed.
+    Misconfigured,
+}
+
+impl SignInError {
+    /// Classifies this failure for the host's response, the way
+    /// `std::io::Error::kind` classifies OS errors. idunn classifies every
+    /// variant, including ones a later version adds, so a host that maps
+    /// `kind()` isn't broken by a new variant — only by a new
+    /// `SignInErrorKind`. Match the variants themselves where you need finer
+    /// detail (e.g. logging `SubjectMismatch` as a security event). See
+    /// docs/architecture.md, "Why the error enums are exhaustive".
+    pub fn kind(&self) -> SignInErrorKind {
+        match self {
+            SignInError::IdentityTokenRejected(err) => err.sign_in_kind(),
+            SignInError::NonceMismatch | SignInError::SubjectMismatch => SignInErrorKind::Rejected,
+            SignInError::Exchange(err) => err.sign_in_kind(),
+            SignInError::RejectedAfterExchange(cause) => cause.sign_in_kind(),
+        }
+    }
+}
+
+// Sign-in classifications of the payloads `SignInError::kind` delegates to.
+// Private and named for sign-in on purpose: the same `AppleErrorCode` means
+// something else during revocation (`invalid_grant` is a success there). No
+// wildcard arms: a variant added to any of these enums fails to compile here
+// until it is classified.
+impl VerificationError {
+    fn sign_in_kind(&self) -> SignInErrorKind {
+        match self {
+            VerificationError::InvalidToken(_) => SignInErrorKind::Rejected,
+            VerificationError::CannotVerifyToken => SignInErrorKind::Unavailable,
+        }
+    }
+}
+
+impl AppleErrorCode {
+    fn sign_in_kind(&self) -> SignInErrorKind {
+        match self {
+            AppleErrorCode::InvalidRequest | AppleErrorCode::InvalidGrant => {
+                SignInErrorKind::Rejected
+            }
+            AppleErrorCode::InvalidClient
+            | AppleErrorCode::UnauthorizedClient
+            | AppleErrorCode::UnsupportedGrantType
+            | AppleErrorCode::InvalidScope => SignInErrorKind::Misconfigured,
+            // idunn doesn't see the HTTP status: an unparseable 5xx body lands here.
+            AppleErrorCode::UnknownError(_) => SignInErrorKind::Unavailable,
+        }
+    }
+}
+
+impl TokenExchangeError {
+    fn sign_in_kind(&self) -> SignInErrorKind {
+        match self {
+            TokenExchangeError::NetworkError(_) | TokenExchangeError::InvalidTokenResponse(_) => {
+                SignInErrorKind::Unavailable
+            }
+            TokenExchangeError::ClientSecretSigningFailed(_) => SignInErrorKind::Misconfigured,
+            TokenExchangeError::TokenExchangeFailed(code) => code.sign_in_kind(),
+        }
+    }
+}
+
+impl PostExchangeRejection {
+    fn sign_in_kind(&self) -> SignInErrorKind {
+        match self {
+            PostExchangeRejection::TokenUnverified(err) => err.sign_in_kind(),
+            PostExchangeRejection::NonceMismatch => SignInErrorKind::Rejected,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +374,120 @@ mod tests {
         assert_eq!(
             AppleErrorCode::from_response_body(body.clone()),
             AppleErrorCode::UnknownError(body)
+        );
+    }
+
+    /// Every `AppleErrorCode`, with how a sign-in that hit it at the token
+    /// endpoint is classified. Shared by the two tests below.
+    fn apple_error_code_kinds() -> [(AppleErrorCode, SignInErrorKind); 7] {
+        [
+            (AppleErrorCode::InvalidRequest, SignInErrorKind::Rejected),
+            (AppleErrorCode::InvalidGrant, SignInErrorKind::Rejected),
+            (
+                AppleErrorCode::InvalidClient,
+                SignInErrorKind::Misconfigured,
+            ),
+            (
+                AppleErrorCode::UnauthorizedClient,
+                SignInErrorKind::Misconfigured,
+            ),
+            (
+                AppleErrorCode::UnsupportedGrantType,
+                SignInErrorKind::Misconfigured,
+            ),
+            (AppleErrorCode::InvalidScope, SignInErrorKind::Misconfigured),
+            (
+                AppleErrorCode::UnknownError("<html>502</html>".to_string()),
+                SignInErrorKind::Unavailable,
+            ),
+        ]
+    }
+
+    #[test]
+    fn apple_error_codes_classify_for_sign_in() {
+        for (code, expected) in apple_error_code_kinds() {
+            assert_eq!(code.sign_in_kind(), expected, "{code:?}");
+        }
+    }
+
+    /// One row per leaf failure `sign_up_or_log_in` can produce. The
+    /// wildcard-free `match` makes a new `SignInError` variant fail to compile
+    /// here, and `covered` makes a variant without a row fail at runtime.
+    #[test]
+    fn sign_in_error_kind_classifies_every_variant() {
+        let invalid = || VerificationError::InvalidToken(InvalidTokenCause::MissingNonce);
+        let signing_failure = || {
+            ClientSecretError::from(
+                jsonwebtoken::EncodingKey::from_ec_pem(b"not a key")
+                    .expect_err("a malformed PEM is rejected"),
+            )
+        };
+        let mut cases = vec![
+            (
+                SignInError::IdentityTokenRejected(invalid()),
+                SignInErrorKind::Rejected,
+            ),
+            (
+                SignInError::IdentityTokenRejected(VerificationError::CannotVerifyToken),
+                SignInErrorKind::Unavailable,
+            ),
+            (SignInError::NonceMismatch, SignInErrorKind::Rejected),
+            (
+                SignInError::Exchange(TokenExchangeError::NetworkError(Box::new(
+                    std::io::Error::other("connection refused"),
+                ))),
+                SignInErrorKind::Unavailable,
+            ),
+            (
+                SignInError::Exchange(TokenExchangeError::ClientSecretSigningFailed(
+                    signing_failure(),
+                )),
+                SignInErrorKind::Misconfigured,
+            ),
+            (
+                SignInError::Exchange(TokenExchangeError::InvalidTokenResponse(
+                    serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+                )),
+                SignInErrorKind::Unavailable,
+            ),
+            (SignInError::SubjectMismatch, SignInErrorKind::Rejected),
+            (
+                SignInError::RejectedAfterExchange(PostExchangeRejection::NonceMismatch),
+                SignInErrorKind::Rejected,
+            ),
+            (
+                SignInError::RejectedAfterExchange(PostExchangeRejection::TokenUnverified(
+                    invalid(),
+                )),
+                SignInErrorKind::Rejected,
+            ),
+            (
+                SignInError::RejectedAfterExchange(PostExchangeRejection::TokenUnverified(
+                    VerificationError::CannotVerifyToken,
+                )),
+                SignInErrorKind::Unavailable,
+            ),
+        ];
+        cases.extend(apple_error_code_kinds().into_iter().map(|(code, kind)| {
+            (
+                SignInError::Exchange(TokenExchangeError::TokenExchangeFailed(code)),
+                kind,
+            )
+        }));
+        let mut covered = [false; 5];
+        for (err, expected) in cases {
+            covered[match &err {
+                SignInError::IdentityTokenRejected(_) => 0,
+                SignInError::NonceMismatch => 1,
+                SignInError::Exchange(_) => 2,
+                SignInError::SubjectMismatch => 3,
+                SignInError::RejectedAfterExchange(_) => 4,
+            }] = true;
+            assert_eq!(err.kind(), expected, "{err:?}");
+        }
+        assert!(
+            covered.iter().all(|&c| c),
+            "every SignInError variant needs a row"
         );
     }
 }

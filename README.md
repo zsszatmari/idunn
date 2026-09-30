@@ -19,11 +19,12 @@ let apple = AppleAuthClient::new(AppleTokenConfig {
 })?
 .with_background_refresh(tokio::runtime::Handle::current());
 
-// Your storage, once. idunn calls these during a sign-in.
+// Your storage, once. idunn calls these during a sign-in. MyError is your own
+// error type; it must implement From<idunn::SignInError>.
 impl AppleAccounts for MyAccounts {
-    type Error = MyDbError;
+    type Error = MyError;
 
-    async fn lookup(&self, identity: &AppleIdentity) -> Result<AccountState, MyDbError> {
+    async fn lookup(&self, identity: &AppleIdentity) -> Result<AccountState, MyError> {
         // AccountState::AlreadyOnFile if a usable refresh token is stored for
         // this Apple user, NeedsExchange otherwise.
         self.lookup_account(&identity.apple_user_id).await
@@ -40,10 +41,10 @@ impl AppleAccounts for MyAccounts {
 // Per sign-in. `identity_token` and `authorization_code` come from the app's
 // ASAuthorizationAppleIDCredential; `expected_nonce` is the single-use value
 // your server issued for this attempt.
-// `?` uses your `From<SignInError<MyDbError>> for MyError`, where
-// MyDbError is your `AppleAccounts::Error`. It matches every variant
-// with no wildcard: a variant added in a later idunn version won't compile
-// until you decide what it means.
+// `?` hands back your own MyError: a failed lookup exactly as you returned
+// it, idunn's own failures converted by your From<SignInError> for MyError,
+// where err.kind() says how to answer: Rejected (401), Unavailable (503) or
+// Misconfigured (500).
 let outcome = apple
     .sign_up_or_log_in_with_nonce(
         &identity_token,

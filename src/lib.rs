@@ -25,8 +25,8 @@ mod transport;
 pub use config::{NoncePolicy, NonceRequirement, Permissive, Strict, VerificationConfig};
 pub use error::{
     AppleErrorCode, ClientSecretError, CodeExchangeError, InvalidPrivateKeyError,
-    InvalidTokenCause, PendingRevocation, PostExchangeRejection, SignInError, TokenExchangeError,
-    TokenRevocationError, VerificationError,
+    InvalidTokenCause, PendingRevocation, PostExchangeRejection, SignInError, SignInErrorKind,
+    TokenExchangeError, TokenRevocationError, VerificationError,
 };
 pub use identity_verification::{
     AppleEmail, AppleIdentity, IdentityWithPendingNonce, RealUserStatus,
@@ -147,11 +147,15 @@ impl SignInOutcome {
 /// The host's account storage, as `sign_up_or_log_in` sees it: both storage
 /// hooks of a sign-in, on one type. The obligations are in docs/usage.md,
 /// "The `AppleAccounts` contract"; the reasoning in docs/architecture.md,
-/// "Why the account hooks are one `AppleAccounts` trait". Implement it with
-/// `async fn`.
+/// "Why the account hooks are one `AppleAccounts` trait" and "Why sign-in
+/// returns the host's own error type". Implement it with `async fn`.
 pub trait AppleAccounts: Sync {
-    /// Returned unchanged as `SignInError::AccountLookupFailed`.
-    type Error: std::error::Error + Send + Sync + 'static;
+    /// Your own error type, and what `sign_up_or_log_in` returns: `lookup`'s
+    /// and `nonce_checker`'s errors come back exactly as you returned them, and
+    /// idunn's own failures arrive converted through `From<SignInError>` —
+    /// where [`SignInError::kind`] says how to answer them. The same shape as
+    /// sqlx's `Connection::transaction`.
+    type Error: From<SignInError> + std::error::Error + Send + Sync + 'static;
 
     /// Whether a usable refresh token is on file for `identity`. Called at
     /// most once, after the identity token and its nonce are verified and
@@ -163,9 +167,9 @@ pub trait AppleAccounts: Sync {
 
     /// Files a live refresh token idunn rejected after the exchange, for
     /// revocation no sooner than `pending.grace_period` from now (obligation
-    /// 5). Awaited before `sign_up_or_log_in` returns
-    /// `SignInError::RejectedAfterExchange`; a failure to file is the
-    /// implementation's own to log.
+    /// 5). Awaited before `sign_up_or_log_in` fails with
+    /// `SignInError::RejectedAfterExchange` (converted into `Self::Error`); a
+    /// failure to file is the implementation's own to log.
     fn schedule_revocation(&self, pending: PendingRevocation) -> impl Future<Output = ()> + Send;
 }
 
@@ -312,10 +316,10 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     ///
     /// `nonce_checker` gets the token's `nonce` claim verbatim (`None` only
     /// under `NoncePolicy::Permissive`), called exactly once, for
-    /// `identity_token`. `Ok(false)` is a mismatch; `Err(_)` means the check
-    /// itself failed (e.g. a database lookup), reported as
-    /// `SignInError::NonceCheckFailed` (carrying the checker's error
-    /// unchanged) rather than a false mismatch. When the code is exchanged,
+    /// `identity_token`. `Ok(false)` is a mismatch (`SignInError::NonceMismatch`);
+    /// `Err(e)` means the check itself failed (e.g. a database lookup) and is
+    /// returned as-is — it is already your `A::Error` — rather than reported as
+    /// a false mismatch. When the code is exchanged,
     /// `sign_up_or_log_in` compares the exchanged `id_token`'s nonce against
     /// the identity token's already-accepted nonce with `nonce_eq` — see
     /// docs/architecture.md, "Why the exchanged nonce is compared against the
@@ -326,10 +330,15 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// `sign_up_or_log_in` exchanges the authorization code at all.
     /// `AccountState::AlreadyOnFile` returns `SignInOutcome::LoggedIn`
     /// immediately, leaving the code unspent; `AccountState::NeedsExchange`
-    /// falls through to the exchange. `Err(_)` is
-    /// `SignInError::AccountLookupFailed` (carrying the lookup's error
-    /// unchanged) — a lookup failure, not a verdict that the account doesn't
-    /// exist.
+    /// falls through to the exchange. `Err(e)` is returned as-is — a lookup
+    /// failure, not a verdict that the account doesn't exist.
+    ///
+    /// **Errors.** The error type is your own `A::Error`
+    /// (`AppleAccounts::Error`): your hooks' errors pass through unchanged, and
+    /// idunn's own failures are a [`SignInError`] converted through the
+    /// `From<SignInError>` the trait requires — "returns `SignInError::…`"
+    /// below means exactly that. [`SignInError::kind`] classifies them for your
+    /// response.
     ///
     /// **Replay caveat for the login branch:** ordinarily, exchanging the
     /// authorization code is a de-facto single-use check — replaying a
@@ -360,39 +369,40 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     // `FnOnce(Option<String>) -> Fut`, not `AsyncFn`" — only `nonce_checker`
     // follows that reasoning. The two storage hooks are `AppleAccounts`
     // methods, see "Why the account hooks are one `AppleAccounts` trait".
-    pub async fn sign_up_or_log_in<F, Fut, A, NonceErr>(
+    pub async fn sign_up_or_log_in<F, Fut, A>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         nonce_checker: F,
         accounts: &A,
-    ) -> Result<SignInOutcome, SignInError<A::Error, NonceErr>>
+    ) -> Result<SignInOutcome, A::Error>
     where
         F: FnOnce(Option<String>) -> Fut,
-        Fut: Future<Output = Result<bool, NonceErr>> + Send,
+        Fut: Future<Output = Result<bool, A::Error>> + Send,
         A: AppleAccounts,
-        NonceErr: std::error::Error + Send + Sync + 'static,
     {
-        let verified = self.verify_identity_token(identity_token).await?;
-        match nonce_checker(verified.nonce.clone()).await {
-            Ok(true) => {}
-            Ok(false) => return Err(SignInError::NonceMismatch),
-            Err(cause) => return Err(SignInError::NonceCheckFailed(cause)),
+        let verified = self
+            .verify_identity_token(identity_token)
+            .await
+            .map_err(SignInError::IdentityTokenRejected)?;
+        if !nonce_checker(verified.nonce.clone()).await? {
+            return Err(SignInError::NonceMismatch.into());
         }
 
-        match accounts.lookup(&verified.identity).await {
-            Ok(AccountState::AlreadyOnFile) => {
+        match accounts.lookup(&verified.identity).await? {
+            AccountState::AlreadyOnFile => {
                 return Ok(SignInOutcome::LoggedIn {
                     identity: verified.identity,
                 });
             }
-            Ok(AccountState::NeedsExchange) => {}
-            Err(cause) => return Err(SignInError::AccountLookupFailed(cause)),
+            AccountState::NeedsExchange => {}
         }
 
         let details = match self.exchange_authorization_code(authorization_code).await {
             Ok(details) => details,
-            Err(CodeExchangeError::Exchange(err)) => return Err(err.into()),
+            Err(CodeExchangeError::Exchange(err)) => {
+                return Err(SignInError::Exchange(err).into());
+            }
             Err(CodeExchangeError::ExchangedTokenUnverified {
                 refresh_token,
                 cause,
@@ -403,7 +413,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
                     verified.identity,
                     PostExchangeRejection::TokenUnverified(cause),
                 )
-                .await);
+                .await
+                .into());
             }
         };
 
@@ -412,7 +423,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         // otherwise be classified as an ordinary `NonceMismatch` and hand a
         // stranger's token back for revocation. See docs/architecture.md.
         if details.identity.apple_user_id != verified.identity.apple_user_id {
-            return Err(SignInError::SubjectMismatch);
+            return Err(SignInError::SubjectMismatch.into());
         }
 
         // See docs/architecture.md, "Why the exchanged nonce is compared
@@ -429,7 +440,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
                 verified.identity,
                 PostExchangeRejection::NonceMismatch,
             )
-            .await);
+            .await
+            .into());
         }
 
         Ok(SignInOutcome::SignedUp {
@@ -514,12 +526,12 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
 /// It goes to the host's `AppleAccounts::schedule_revocation` instead, awaited
 /// before the error is returned, so the error itself carries no token to lose
 /// — see "Why a post-exchange rejection goes through `schedule_revocation`".
-async fn reject_after_exchange<A: AppleAccounts, NonceErr>(
+async fn reject_after_exchange<A: AppleAccounts>(
     accounts: &A,
     refresh_token: RefreshToken,
     identity: AppleIdentity,
     cause: PostExchangeRejection,
-) -> SignInError<A::Error, NonceErr> {
+) -> SignInError {
     accounts
         .schedule_revocation(PendingRevocation {
             refresh_token,
@@ -685,7 +697,8 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     /// client.sign_up_or_log_in(identity_token, code, |candidate| async move {
     ///     match candidate {
     ///         Some(nonce) => Ok(nonce == expected_nonce),
-    ///         None => Ok(my_replay_store.check_and_record(identity_token).await),
+    ///         // Fails with your own AppleAccounts::Error, like lookup does.
+    ///         None => my_replay_store.check_and_record(identity_token).await,
     ///     }
     /// }, &accounts).await
     /// ```
@@ -695,12 +708,12 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
         authorization_code: &str,
         expected_nonce: &str,
         accounts: &A,
-    ) -> Result<SignInOutcome, SignInError<A::Error>> {
+    ) -> Result<SignInOutcome, A::Error> {
         self.sign_up_or_log_in(
             identity_token,
             authorization_code,
             move |candidate| async move {
-                Ok::<_, std::convert::Infallible>(nonce_eq(candidate.as_deref(), expected_nonce))
+                Ok::<_, A::Error>(nonce_eq(candidate.as_deref(), expected_nonce))
             },
             accounts,
         )
@@ -1125,14 +1138,30 @@ mod tests {
         (client, identity_token, transport)
     }
 
-    /// Stand-ins for a host's own `AppleAccounts::Error` / `nonce_checker` error
-    /// types. Distinct types, so a test that mixes the two up fails to compile.
+    /// Stand-ins for a host's own `lookup` / `nonce_checker` failures, which
+    /// `TestError` wraps. Distinct types, so an assertion that mixes up which hook
+    /// failed can't match.
     #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
     #[error("{0}")]
     struct LookupFailure(&'static str);
     #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
     #[error("{0}")]
     struct NonceStoreFailure(&'static str);
+
+    /// A host's own error type, shaped the way `AppleAccounts::Error` is meant
+    /// to be: idunn's `SignInError` arrives through `From` (so idunn's `?`
+    /// lands here), next to the host's own hook failures, which idunn returns
+    /// untouched. Not `Clone` (`SignInError` isn't), which is why `TestAccounts`
+    /// stores a `LookupFailure` and converts it on each call.
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        SignIn(#[from] SignInError),
+        #[error("account lookup failed: {0}")]
+        Lookup(#[from] LookupFailure),
+        #[error("nonce check failed: {0}")]
+        NonceStore(#[from] NonceStoreFailure),
+    }
 
     /// Test double for a host's `AppleAccounts`. `lookup` answers with a fixed
     /// result. Scheduling panics unless `recording_revocations()` enabled it, so
@@ -1175,11 +1204,11 @@ mod tests {
     }
 
     impl AppleAccounts for TestAccounts {
-        type Error = LookupFailure;
+        type Error = TestError;
 
-        async fn lookup(&self, _identity: &AppleIdentity) -> Result<AccountState, LookupFailure> {
+        async fn lookup(&self, _identity: &AppleIdentity) -> Result<AccountState, TestError> {
             tokio::task::yield_now().await;
-            self.lookup.clone()
+            Ok(self.lookup.clone()?)
         }
 
         async fn schedule_revocation(&self, pending: PendingRevocation) {
@@ -1236,23 +1265,23 @@ mod tests {
             move |candidate| {
                 let expected = expected.clone();
                 async move {
-                    Ok::<bool, std::convert::Infallible>(candidate.as_deref() == Some(expected.as_str()))
+                    Ok::<bool, TestError>(candidate.as_deref() == Some(expected.as_str()))
                 }
             },
             &accounts,
         ));
     }
 
-    /// `sign_up_or_log_in` returns `Result<_, SignInError>` from every frame on
-    /// the success path too, so the error stays under clippy's 128-byte
-    /// `result_large_err` budget. `RejectedAfterExchange` carries
-    /// `PostExchangeRejection` unboxed — the live token and its
-    /// `grace_period` go to `schedule_revocation`, not into the error, so
-    /// nothing large rides along. Measures idunn's own variants only — a
-    /// host's `LookupErr`/`NonceErr` adds its own size on top.
+    /// Every host's `AppleAccounts::Error` embeds `SignInError` (it must be
+    /// `From<SignInError>`), and `sign_up_or_log_in` returns that type from every
+    /// frame on the success path too — so `SignInError` must stay under clippy's
+    /// 128-byte `result_large_err` budget or it inflates every host's error.
+    /// `RejectedAfterExchange` carries `PostExchangeRejection` unboxed — the live
+    /// token and its `grace_period` go to `schedule_revocation`, not into the
+    /// error, so nothing large rides along.
     #[test]
     fn sign_in_error_stays_small() {
-        assert!(std::mem::size_of::<SignInError<(), ()>>() <= 128);
+        assert!(std::mem::size_of::<SignInError>() <= 128);
     }
 
     #[tokio::test]
@@ -1310,7 +1339,7 @@ mod tests {
                         let removed = candidate
                             .map(|nonce| pending.lock().unwrap().remove(&nonce))
                             .unwrap_or(false);
-                        Ok::<bool, std::convert::Infallible>(removed)
+                        Ok::<bool, TestError>(removed)
                     }
                 },
                 &TestAccounts::needs_exchange(),
@@ -1332,7 +1361,7 @@ mod tests {
             .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
-                |_candidate| async move { Ok::<bool, std::convert::Infallible>(true) },
+                |_candidate| async move { Ok::<bool, TestError>(true) },
                 &TestAccounts::needs_exchange(),
             )
             .await
@@ -1354,14 +1383,16 @@ mod tests {
             .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
-                |_candidate| async move { Ok::<bool, std::convert::Infallible>(true) },
+                |_candidate| async move { Ok::<bool, TestError>(true) },
                 &accounts,
             )
             .await;
 
         assert!(matches!(
             result,
-            Err(SignInError::RejectedAfterExchange(PostExchangeRejection::NonceMismatch))
+            Err(TestError::SignIn(SignInError::RejectedAfterExchange(
+                PostExchangeRejection::NonceMismatch
+            )))
         ));
         let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
@@ -1386,7 +1417,10 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(SignInError::NonceMismatch)));
+        assert!(matches!(
+            result,
+            Err(TestError::SignIn(SignInError::NonceMismatch))
+        ));
         assert!(transport.posts().is_empty());
     }
 
@@ -1419,7 +1453,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SignInError::RejectedAfterExchange(PostExchangeRejection::TokenUnverified(_)))
+            Err(TestError::SignIn(SignInError::RejectedAfterExchange(
+                PostExchangeRejection::TokenUnverified(_)
+            )))
         ));
         let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
@@ -1449,7 +1485,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SignInError::RejectedAfterExchange(PostExchangeRejection::NonceMismatch))
+            Err(TestError::SignIn(SignInError::RejectedAfterExchange(
+                PostExchangeRejection::NonceMismatch
+            )))
         ));
         let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
@@ -1482,7 +1520,10 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(SignInError::SubjectMismatch)));
+        assert!(matches!(
+            result,
+            Err(TestError::SignIn(SignInError::SubjectMismatch))
+        ));
         let posts = transport.posts();
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].0, "https://appleid.apple.com/auth/token");
@@ -1506,11 +1547,15 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(SignInError::SubjectMismatch)));
+        assert!(matches!(
+            result,
+            Err(TestError::SignIn(SignInError::SubjectMismatch))
+        ));
     }
 
     /// A nonce lookup that fails outright (e.g. a database error) must not be
-    /// reported the same way as a nonce the caller actually rejected.
+    /// reported the same way as a nonce the caller actually rejected — it comes
+    /// back as the checker's own error, untouched.
     #[tokio::test]
     async fn sign_up_or_log_in_reports_a_failed_nonce_lookup_separately_from_a_mismatch() {
         let (client, identity_token, transport) =
@@ -1521,7 +1566,7 @@ mod tests {
                 &identity_token,
                 "auth-code",
                 |_candidate| async move {
-                    Err::<bool, _>(NonceStoreFailure("session store unavailable"))
+                    Err::<bool, TestError>(NonceStoreFailure("session store unavailable").into())
                 },
                 &TestAccounts::needs_exchange(),
             )
@@ -1529,7 +1574,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SignInError::NonceCheckFailed(NonceStoreFailure(
+            Err(TestError::NonceStore(NonceStoreFailure(
                 "session store unavailable"
             )))
         ));
@@ -1593,7 +1638,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SignInError::AccountLookupFailed(LookupFailure(
+            Err(TestError::Lookup(LookupFailure(
                 "account store unavailable"
             )))
         ));
