@@ -22,4 +22,3 @@ RUN groupadd --gid 1000 $USERNAME \
 RUN rustup component add rust-analyzer rust-src clippy rustfmt
 # nightly needed for coverage,#cfg[coverage(off)] is unsupported on stable
 RUN rustup toolchain install nightly --component llvm-tools
-RUN cargo +stable install --locked
