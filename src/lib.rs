@@ -69,9 +69,9 @@ const REVOCATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
 /// that hex-encode in upper case, constant time protects a server-side-secret
 /// `expected_nonce` from a timing side channel — see docs/architecture.md for
-/// the limits of that protection. Used by `sign_up_or_log_in_with_nonce`, and
-/// internally by `sign_up_or_log_in` to compare the exchanged `id_token`'s
-/// nonce against the identity token's already-accepted nonce.
+/// the limits of that protection. Used by `sign_up_or_log_in`, and internally
+/// by `sign_up_or_log_in_with_nonce_checker` to compare the exchanged
+/// `id_token`'s nonce against the identity token's already-accepted nonce.
 fn nonce_eq(candidate: Option<&str>, expected: &str) -> bool {
     let Some(candidate) = candidate else {
         return false;
@@ -207,7 +207,7 @@ struct Credentials {
 ///
 /// `N: NonceRequirement` (default `Strict`) fixes the `NoncePolicy`
 /// identity-token verification enforces, and whether
-/// `sign_up_or_log_in_with_nonce` exists on this client — see
+/// `sign_up_or_log_in` exists on this client — see
 /// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
 /// type parameter").
 #[derive(Clone)]
@@ -322,6 +322,11 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         }
     }
 
+    /// `sign_up_or_log_in` with a nonce check of your own. A `Strict` client that
+    /// compares the nonce against one expected value should call
+    /// `sign_up_or_log_in`; this method is for a `Permissive` client or a
+    /// single-use nonce store.
+    ///
     /// Verifies an identity token, looks the Apple user up through
     /// `accounts.lookup`, exchanges the authorization code and checks that both
     /// tokens agree on the nonce and the Apple user — the full, safe path for a
@@ -335,7 +340,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// `identity_token`. `Ok(false)` is a mismatch (`SignInError::NonceMismatch`);
     /// `Err(e)` means the check itself failed (e.g. a database lookup) and is
     /// returned as-is — it is already your `A::Error` — rather than reported as
-    /// a false mismatch. After the exchange, `sign_up_or_log_in` compares the
+    /// a false mismatch. After the exchange, this method compares the
     /// exchanged `id_token`'s nonce against the identity token's
     /// already-accepted nonce with `nonce_eq` — see docs/architecture.md, "Why
     /// the exchanged nonce is compared against the identity token's".
@@ -388,11 +393,11 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// discards another user's token", "Why a post-exchange rejection goes
     /// through `schedule_revocation`" and "Why a refreshed token replaces the
     /// stored one and is never revoked".
-    // See docs/architecture.md: "Why sign_up_or_log_in's nonce checker is
+    // See docs/architecture.md: "Why the nonce checker is
     // `FnOnce(Option<String>) -> Fut`, not `AsyncFn`" — only `nonce_checker`
     // follows that reasoning. The two storage hooks are `AppleAccounts`
     // methods, see "Why the account hooks are one `AppleAccounts` trait".
-    pub async fn sign_up_or_log_in<F, Fut, A>(
+    pub async fn sign_up_or_log_in_with_nonce_checker<F, Fut, A>(
         &self,
         identity_token: &str,
         authorization_code: &str,
@@ -662,7 +667,7 @@ impl AppleAuthClient<transport::ReqwestTransport, Strict> {
 
 /// An `AppleAuthClient` that has been built but not yet given a JWKS refresh
 /// strategy: it exposes none of `verify_identity_token`,
-/// `sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`,
+/// `sign_up_or_log_in`/`sign_up_or_log_in_with_nonce_checker`,
 /// `exchange_authorization_code`, `revoke_refresh_token` or
 /// `refresh_keystore`, so it cannot be used before one is chosen. Call
 /// `AppleSeed::with_background_refresh` (`tokio-refresh` feature),
@@ -763,23 +768,23 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     }
 }
 
-/// `sign_up_or_log_in_with_nonce` exists only here, on a `Strict` client — see
+/// `sign_up_or_log_in` exists only here, on a `Strict` client — see
 /// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
 /// type parameter").
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
-    /// `sign_up_or_log_in` with a checker that compares the claim directly
-    /// against `expected_nonce` — constant-time and ASCII-case-insensitive,
+    /// `sign_up_or_log_in_with_nonce_checker` with a checker that compares the
+    /// claim directly against `expected_nonce` — constant-time and ASCII-case-insensitive,
     /// see `nonce_eq`. A missing nonce (`None`) is a rejection, though under
     /// `Strict` that's moot: `verify_identity_token` already rejects a missing
     /// nonce as `IdentityTokenRejected` before the checker runs.
     ///
-    /// A `Permissive` client needs `sign_up_or_log_in` directly, with a
-    /// checker that decides what a missing nonce means for its flow (e.g. a
-    /// replay-detection window from `AppleIdentity::issued_at`/`expiration`,
-    /// per `NoncePolicy`):
+    /// A `Permissive` client needs `sign_up_or_log_in_with_nonce_checker`
+    /// directly, with a checker that decides what a missing nonce means for
+    /// its flow (e.g. a replay-detection window from
+    /// `AppleIdentity::issued_at`/`expiration`, per `NoncePolicy`):
     ///
     /// ```ignore
-    /// client.sign_up_or_log_in(identity_token, code, |candidate| async move {
+    /// client.sign_up_or_log_in_with_nonce_checker(identity_token, code, |candidate| async move {
     ///     match candidate {
     ///         Some(nonce) => Ok(nonce == expected_nonce),
     ///         // Fails with your own AppleAccounts::Error, like lookup does.
@@ -787,14 +792,14 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     ///     }
     /// }, &accounts).await
     /// ```
-    pub async fn sign_up_or_log_in_with_nonce<A: AppleAccounts>(
+    pub async fn sign_up_or_log_in<A: AppleAccounts>(
         &self,
         identity_token: &str,
         authorization_code: &str,
         expected_nonce: &str,
         accounts: &A,
     ) -> Result<SignInOutcome, A::Error> {
-        self.sign_up_or_log_in(
+        self.sign_up_or_log_in_with_nonce_checker(
             identity_token,
             authorization_code,
             move |candidate| async move {
@@ -1196,9 +1201,9 @@ mod tests {
 
     /// Builds a client and an exchange response whose `id_token` is itself a
     /// freshly signed, valid identity token for `sub` — the shape every
-    /// `sign_up_or_log_in`/`sign_up_or_log_in_with_nonce` test starts from,
-    /// since it lets each test tweak exactly one thing (a nonce, a `sub`) and
-    /// still get a well-formed exchange otherwise. Returns the client, the
+    /// `sign_up_or_log_in`/`sign_up_or_log_in_with_nonce_checker` test starts
+    /// from, since it lets each test tweak exactly one thing (a nonce, a `sub`)
+    /// and still get a well-formed exchange otherwise. Returns the client, the
     /// caller's identity token, and the transport (so posts can be inspected).
     fn client_for_sign_up_or_log_in(
         exchanged_nonce: &str,
@@ -1369,13 +1374,13 @@ mod tests {
         assert_send(client.revoke_refresh_token("refresh-token"));
     }
 
-    /// Guards that `sign_up_or_log_in_with_nonce`'s future stays `Send`, as
+    /// Guards that `sign_up_or_log_in`'s future stays `Send`, as
     /// required by `Send`-bound callers such as axum handlers.
     #[test]
-    fn sign_up_or_log_in_with_nonce_future_is_send() {
+    fn sign_up_or_log_in_future_is_send() {
         let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
         let accounts = TestAccounts::not_on_file();
-        assert_send(client.sign_up_or_log_in_with_nonce(
+        assert_send(client.sign_up_or_log_in(
             &identity_token,
             "auth-code",
             "nonce",
@@ -1383,19 +1388,19 @@ mod tests {
         ));
     }
 
-    /// Guards that `sign_up_or_log_in`'s future stays `Send` for any checker
-    /// closure that itself returns a `Send` future, as required by `Send`-bound
-    /// callers such as axum handlers. `TestAccounts` implements `AppleAccounts`
-    /// with `async fn`s that hold `&self` across an await, so this guard also
-    /// covers the `AppleAccounts` futures' contribution to the overall future's
-    /// `Send`-ness.
+    /// Guards that `sign_up_or_log_in_with_nonce_checker`'s future stays `Send`
+    /// for any checker closure that itself returns a `Send` future, as required
+    /// by `Send`-bound callers such as axum handlers. `TestAccounts` implements
+    /// `AppleAccounts` with `async fn`s that hold `&self` across an await, so
+    /// this guard also covers the `AppleAccounts` futures' contribution to the
+    /// overall future's `Send`-ness.
     #[test]
-    fn sign_up_or_log_in_future_is_send() {
+    fn sign_up_or_log_in_with_nonce_checker_future_is_send() {
         let (client, identity_token, _transport) =
             client_for_sign_up_or_log_in("nonce", "apple-user-1");
         let expected = String::from("nonce");
         let accounts = TestAccounts::not_on_file();
-        assert_send(client.sign_up_or_log_in(
+        assert_send(client.sign_up_or_log_in_with_nonce_checker(
             &identity_token,
             "auth-code",
             move |candidate| {
@@ -1426,7 +1431,7 @@ mod tests {
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
         let outcome = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1466,7 +1471,7 @@ mod tests {
         ])));
 
         let outcome = client
-            .sign_up_or_log_in(
+            .sign_up_or_log_in_with_nonce_checker(
                 &identity_token,
                 "auth-code",
                 move |candidate| {
@@ -1494,7 +1499,7 @@ mod tests {
             permissive_client_for_sign_up_or_log_in(None, None, "apple-user-1");
 
         let outcome = client
-            .sign_up_or_log_in(
+            .sign_up_or_log_in_with_nonce_checker(
                 &identity_token,
                 "auth-code",
                 |_candidate| async move { Ok::<bool, TestError>(true) },
@@ -1516,7 +1521,7 @@ mod tests {
         let accounts = TestAccounts::not_on_file().recording_revocations();
 
         let result = client
-            .sign_up_or_log_in(
+            .sign_up_or_log_in_with_nonce_checker(
                 &identity_token,
                 "auth-code",
                 |_candidate| async move { Ok::<bool, TestError>(true) },
@@ -1545,7 +1550,7 @@ mod tests {
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "wrong-nonce",
@@ -1579,7 +1584,7 @@ mod tests {
         let accounts = TestAccounts::not_on_file().recording_revocations();
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1611,7 +1616,7 @@ mod tests {
         let accounts = TestAccounts::not_on_file().recording_revocations();
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1648,7 +1653,7 @@ mod tests {
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-2");
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1675,7 +1680,7 @@ mod tests {
             client_for_sign_up_or_log_in("a-different-nonce", "apple-user-2");
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1698,7 +1703,7 @@ mod tests {
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
         let result = client
-            .sign_up_or_log_in(
+            .sign_up_or_log_in_with_nonce_checker(
                 &identity_token,
                 "auth-code",
                 |_candidate| async move {
@@ -1718,12 +1723,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_up_or_log_in_with_nonce_matches_case_insensitively() {
+    async fn sign_up_or_log_in_matches_the_nonce_case_insensitively() {
         let (client, identity_token, _transport) =
             client_for_sign_up_or_log_in("Expected-Nonce", "apple-user-1");
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "EXPECTED-NONCE",
@@ -1755,7 +1760,7 @@ mod tests {
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
         let outcome = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1781,7 +1786,7 @@ mod tests {
         transport.fail_posts_with(|| TransportError::Network("connection reset".into()));
 
         let outcome = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1807,7 +1812,7 @@ mod tests {
         });
 
         let outcome = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1834,7 +1839,7 @@ mod tests {
         });
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1859,7 +1864,7 @@ mod tests {
         transport.fail_posts_with(|| TransportError::Network("connection reset".into()));
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1883,7 +1888,7 @@ mod tests {
             client_for_sign_up_or_log_in("a-different-nonce", "apple-user-1");
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1916,7 +1921,7 @@ mod tests {
         .without_background_refresh();
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1967,7 +1972,7 @@ mod tests {
         transport.fail_gets_after(1);
 
         let outcome = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",
@@ -1988,7 +1993,7 @@ mod tests {
             client_for_sign_up_or_log_in("expected-nonce", "apple-user-1");
 
         let result = client
-            .sign_up_or_log_in_with_nonce(
+            .sign_up_or_log_in(
                 &identity_token,
                 "auth-code",
                 "expected-nonce",

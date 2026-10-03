@@ -209,7 +209,7 @@ pub struct PendingRevocation {
     pub grace_period: Duration,
 }
 
-/// idunn's own reasons `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce`
+/// idunn's own reasons `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce_checker`
 /// failed. Those methods return the host's `AppleAccounts::Error`, which every
 /// host builds from this through `From<SignInError>`; the host's own hook
 /// failures (`AppleAccounts::lookup`, `nonce_checker`) never pass through here.

@@ -46,7 +46,7 @@ impl AppleAccounts for MyAccounts {
 // where err.kind() says how to answer: Rejected (401), Unavailable (503) or
 // Misconfigured (500).
 let outcome = apple
-    .sign_up_or_log_in_with_nonce(
+    .sign_up_or_log_in(
         &identity_token,
         &authorization_code,
         &expected_nonce,
