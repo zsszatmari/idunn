@@ -25,15 +25,15 @@ impl AppleAccounts for MyAccounts {
     type Error = MyError;
 
     async fn lookup(&self, identity: &AppleIdentity) -> Result<AccountState, MyError> {
-        // AccountState::AlreadyOnFile if a usable refresh token is stored for
-        // this Apple user, NeedsExchange otherwise.
+        // AccountState::AlreadyOnFile { refresh_token } with the stored token
+        // if one is stored for this Apple user, NotOnFile otherwise.
         self.lookup_account(&identity.apple_user_id).await
     }
 
     async fn schedule_revocation(&self, pending: PendingRevocation) {
-        // Apple issued a live token for a sign-in idunn then rejected. Store it
-        // durably for your revocation worker, not sooner than
-        // pending.grace_period from now.
+        // Apple issued a live token for a new authorization that idunn then
+        // rejected. Store it durably for your revocation worker, not sooner
+        // than pending.grace_period from now.
         self.file_revocation(pending).await
     }
 }
@@ -55,12 +55,16 @@ let outcome = apple
     .await?;
 
 match outcome {
-    SignInOutcome::LoggedIn { identity } => {
-        // Known user, token already on file: start a session.
+    SignInOutcome::LoggedIn { identity, refresh_token } => {
+        // Known user: refresh_token is the freshly exchanged one, or the stored
+        // one handed back when Apple couldn't issue a new one. Write it over
+        // the stored token, then start a session. If writing fails, just drop
+        // it: revoking would end the stored authorization too.
     }
     SignInOutcome::SignedUp { identity, refresh_token } => {
-        // Store refresh_token under identity.apple_user_id, then start a
-        // session. If storing fails, queue the token for revocation instead.
+        // New authorization: store refresh_token under identity.apple_user_id,
+        // then start a session. If storing fails, queue the token for
+        // revocation instead.
     }
 }
 

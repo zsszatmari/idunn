@@ -83,7 +83,10 @@ impl std::fmt::Debug for AppleTokenConfig {
 pub struct RefreshToken(String);
 
 impl RefreshToken {
-    pub(crate) fn new(token: String) -> Self {
+    /// Wraps a token the host stored earlier, so `AppleAccounts::lookup` can
+    /// report it in `AccountState::AlreadyOnFile`. Tokens Apple issues arrive
+    /// already wrapped.
+    pub fn new(token: String) -> Self {
         Self(token)
     }
 

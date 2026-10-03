@@ -163,9 +163,10 @@ pub enum CodeExchangeError {
 /// Why `AppleAuthClient::sign_up_or_log_in` rejected a sign-in *after* the
 /// authorization code was already exchanged for a live refresh token, whose
 /// owner (to idunn's best knowledge) is the caller's own Apple user; see
-/// `SignInError::RejectedAfterExchange`. Carried twice: once in the
-/// `PendingRevocation` handed to `schedule_revocation`, once in
-/// `SignInError::RejectedAfterExchange`.
+/// `SignInError::RejectedAfterExchange`. For a new authorization it is carried
+/// twice: once in the `PendingRevocation` handed to `schedule_revocation`, once
+/// in `SignInError::RejectedAfterExchange`. For a known user's refresh the
+/// token is dropped, so only the error carries it.
 #[derive(Debug, Clone, Error)]
 pub enum PostExchangeRejection {
     /// Apple's token endpoint exchanged the code, but the `id_token` it returned
@@ -177,9 +178,11 @@ pub enum PostExchangeRejection {
     NonceMismatch,
 }
 
-/// A live refresh token that `sign_up_or_log_in` rejected after the
-/// exchange and handed to the host's `schedule_revocation` hook, awaiting
-/// it before returning `SignInError::RejectedAfterExchange` — see
+/// A live refresh token from a new authorization that `sign_up_or_log_in`
+/// rejected after the exchange and handed to the host's `schedule_revocation`
+/// hook, awaiting it before returning `SignInError::RejectedAfterExchange`.
+/// A known user's refresh never produces one: that token is dropped, because
+/// revoking it would end the stored authorization too. See
 /// docs/architecture.md, "Why revocations are coordinated by the host,
 /// through `AppleAccounts`", and "Why a post-exchange rejection goes
 /// through `schedule_revocation`". idunn never revokes it itself. The
@@ -232,9 +235,11 @@ pub enum SignInError {
     )]
     SubjectMismatch,
     /// Rejected after the exchange for a reason in `PostExchangeRejection`: the
-    /// refresh token Apple issued is the caller's own and live, and idunn has
-    /// already handed it to `schedule_revocation` (and awaited it) before
-    /// returning this — nothing is left for the caller to do but answer the
+    /// refresh token Apple issued is the caller's own and live. For a new
+    /// authorization idunn has already handed it to `schedule_revocation` (and
+    /// awaited it) before returning this; for a known user's refresh it dropped
+    /// the token instead, since revoking it would end the stored authorization
+    /// too. Either way nothing is left for the caller to do but answer the
     /// request. Unlike `SubjectMismatch`, whose token belongs to another Apple
     /// user and is discarded without ever calling the hook.
     #[error("sign-in rejected after the authorization code was exchanged: {0}")]
