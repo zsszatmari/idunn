@@ -1,11 +1,11 @@
-//! Compiles only while idunn's public error enums, and `SignInErrorKind`, are
+//! Compiles only while idunn's public error enums, and `ErrorKind`, are
 //! exhaustive: a `#[non_exhaustive]` enum would force a wildcard arm on this
 //! crate-external code. See docs/architecture.md, "Why the error enums are
 //! exhaustive".
 
 use idunn::{
-    AppleErrorCode, CodeExchangeError, InvalidTokenCause, PostExchangeRejection, SignInError,
-    SignInErrorKind, TokenExchangeError, TokenRevocationError, VerificationError,
+    AppleErrorCode, CodeExchangeError, ErrorKind, InvalidTokenCause, PostExchangeRejection,
+    SignInError, TokenExchangeError, TokenRevocationError, VerificationError,
 };
 
 #[test]
@@ -52,9 +52,7 @@ fn error_enums_can_be_matched_without_a_wildcard() {
         | SignInError::SubjectMismatch
         | SignInError::RejectedAfterExchange(_) => {}
     };
-    let _: fn(SignInErrorKind) = |kind| match kind {
-        SignInErrorKind::Rejected
-        | SignInErrorKind::Unavailable
-        | SignInErrorKind::Misconfigured => {}
+    let _: fn(ErrorKind) = |kind| match kind {
+        ErrorKind::Rejected | ErrorKind::Unavailable | ErrorKind::Misconfigured => {}
     };
 }

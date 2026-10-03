@@ -24,9 +24,9 @@ mod transport;
 
 pub use config::{NoncePolicy, NonceRequirement, Permissive, Strict, VerificationConfig};
 pub use error::{
-    AppleErrorCode, ClientSecretError, CodeExchangeError, InvalidPrivateKeyError,
-    InvalidTokenCause, PendingRevocation, PostExchangeRejection, SignInError, SignInErrorKind,
-    TokenExchangeError, TokenRevocationError, VerificationError,
+    AppleErrorCode, ClientSecretError, CodeExchangeError, ErrorKind, InvalidPrivateKeyError,
+    InvalidTokenCause, PendingRevocation, PostExchangeRejection, SignInError, TokenExchangeError,
+    TokenRevocationError, VerificationError,
 };
 pub use identity_verification::{
     AppleEmail, AppleIdentity, IdentityWithPendingNonce, RealUserStatus,
@@ -505,6 +505,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// deletion) so it can no longer be used. `Ok(())` means the token is not
     /// usable any more — either because this call revoked it, or because Apple
     /// already considered it invalid (`invalid_grant`, logged at `warn` level).
+    /// A failure's [`TokenRevocationError::kind`] says how to treat it.
     pub async fn revoke_refresh_token(
         &self,
         refresh_token: &str,
