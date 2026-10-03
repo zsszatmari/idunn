@@ -148,10 +148,13 @@ pub enum CodeExchangeError {
     /// Apple returned with it failed verification.
     ///
     /// Carries `refresh_token` because the code has already been consumed and
-    /// the token is live at Apple: the caller must revoke it with
-    /// `AppleAuthClient::revoke_refresh_token`, ideally retrying later on failure until
-    /// the revocation succeeds. Dropping this error without doing so leaves a
-    /// live token that can't revoked in a nice way.
+    /// the token is live at Apple. What to do with it depends on whether you
+    /// already store a token for the Apple user you are signing in. If not,
+    /// this is a new authorization: revoke it with
+    /// `AppleAuthClient::revoke_refresh_token`, retrying until it succeeds, or
+    /// it outlives the user's chance to delete it. If you do, drop it and never
+    /// revoke it: revoke is authorization-scoped and would end the stored
+    /// authorization too. `sign_up_or_log_in` makes this decision itself.
     #[error("authorization code exchanged, but its identity token failed verification")]
     ExchangedTokenUnverified {
         refresh_token: RefreshToken,

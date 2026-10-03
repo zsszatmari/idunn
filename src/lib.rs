@@ -530,8 +530,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// If the exchange succeeds but verification fails, Apple has already
     /// issued a live refresh token against a now-consumed authorization code;
     /// the returned `CodeExchangeError::ExchangedTokenUnverified` carries that
-    /// token so the caller can revoke it (`revoke_refresh_token`) instead of
-    /// losing track of it.
+    /// token; its documentation says when to revoke it and when to drop it.
     pub async fn exchange_authorization_code(
         &self,
         authorization_code: &str,
@@ -1139,7 +1138,7 @@ mod tests {
 
     /// A successfully exchanged but unverifiable `id_token` must not silently
     /// drop the refresh token Apple already issued: the error variant is the
-    /// only place left to hand it back so the caller can revoke it.
+    /// only place left to hand it back to the caller.
     #[tokio::test]
     async fn exchange_authorization_code_carries_the_refresh_token_when_verification_fails() {
         let transport = FakeAppleTransport::new(
