@@ -1377,14 +1377,10 @@ mod tests {
     /// required by `Send`-bound callers such as axum handlers.
     #[test]
     fn sign_up_or_log_in_future_is_send() {
-        let (client, identity_token, _transport) = client_for_sign_up_or_log_in("nonce", "apple-user-1");
+        let (client, identity_token, _transport) =
+            client_for_sign_up_or_log_in("nonce", "apple-user-1");
         let accounts = TestAccounts::not_on_file();
-        assert_send(client.sign_up_or_log_in(
-            &identity_token,
-            "auth-code",
-            "nonce",
-            &accounts,
-        ));
+        assert_send(client.sign_up_or_log_in(&identity_token, "auth-code", "nonce", &accounts));
     }
 
     /// Guards that `sign_up_or_log_in_with_nonce_checker`'s future stays `Send`
@@ -1536,7 +1532,10 @@ mod tests {
         ));
         let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
-        assert!(matches!(jobs[0].cause, PostExchangeRejection::NonceMismatch));
+        assert!(matches!(
+            jobs[0].cause,
+            PostExchangeRejection::NonceMismatch
+        ));
     }
 
     /// A mismatched identity-token nonce is rejected before the authorization
@@ -1577,18 +1576,17 @@ mod tests {
             jwks_body_including(TEST_KID),
             r#"{"access_token":"at","refresh_token":"rt","id_token":"not-a-jwt","expires_in":3600}"#,
         );
-        let client = AppleAuthClient::with_transport(config, VerificationConfig::default(), transport.clone())
-            .expect("valid test key should construct client")
-            .without_background_refresh();
+        let client = AppleAuthClient::with_transport(
+            config,
+            VerificationConfig::default(),
+            transport.clone(),
+        )
+        .expect("valid test key should construct client")
+        .without_background_refresh();
         let accounts = TestAccounts::not_on_file().recording_revocations();
 
         let result = client
-            .sign_up_or_log_in(
-                &identity_token,
-                "auth-code",
-                "expected-nonce",
-                &accounts,
-            )
+            .sign_up_or_log_in(&identity_token, "auth-code", "expected-nonce", &accounts)
             .await;
 
         assert!(matches!(
@@ -1601,7 +1599,10 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].refresh_token.as_str(), "rt");
         assert_eq!(jobs[0].identity.apple_user_id, "apple-user-1");
-        assert!(matches!(jobs[0].cause, PostExchangeRejection::TokenUnverified(_)));
+        assert!(matches!(
+            jobs[0].cause,
+            PostExchangeRejection::TokenUnverified(_)
+        ));
         assert_eq!(jobs[0].grace_period, REVOCATION_GRACE_PERIOD);
         let posts = transport.posts();
         assert_eq!(posts.len(), 1);
@@ -1615,12 +1616,7 @@ mod tests {
         let accounts = TestAccounts::not_on_file().recording_revocations();
 
         let result = client
-            .sign_up_or_log_in(
-                &identity_token,
-                "auth-code",
-                "expected-nonce",
-                &accounts,
-            )
+            .sign_up_or_log_in(&identity_token, "auth-code", "expected-nonce", &accounts)
             .await;
 
         assert!(matches!(
@@ -1632,7 +1628,10 @@ mod tests {
         let jobs = accounts.scheduled();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].refresh_token.as_str(), "rt");
-        assert!(matches!(jobs[0].cause, PostExchangeRejection::NonceMismatch));
+        assert!(matches!(
+            jobs[0].cause,
+            PostExchangeRejection::NonceMismatch
+        ));
         assert_eq!(jobs[0].grace_period, REVOCATION_GRACE_PERIOD);
         let posts = transport.posts();
         assert_eq!(posts.len(), 1);
