@@ -6,8 +6,8 @@
 
 ```rust
 use idunn::{
-    AccountState, AppleAccounts, AppleAuthClient, AppleIdentity, AppleTokenConfig, PendingRevocation,
-    SignInOutcome,
+    AccountState, AppleAccounts, AppleAuthClient, AppleIdentity, AppleTokenConfig, ErrorKind,
+    PendingRevocation, SignInError, SignInOutcome,
 };
 
 // Once, at startup. Clones are cheap and share the JWKS cache.
@@ -20,7 +20,7 @@ let apple = AppleAuthClient::new(AppleTokenConfig {
 .with_background_refresh(tokio::runtime::Handle::current());
 
 // Your storage, once. idunn calls these during a sign-in. MyError is your own
-// error type; it must implement From<idunn::SignInError>.
+// error type; idunn's failures reach it through the From impl below.
 impl AppleAccounts for MyAccounts {
     type Error = MyError;
 
@@ -38,13 +38,23 @@ impl AppleAccounts for MyAccounts {
     }
 }
 
+// When idunn itself rejects a sign-in, this decides what MyError you get.
+// kind() says how to answer.
+impl From<SignInError> for MyError {
+    fn from(err: SignInError) -> Self {
+        match err.kind() {
+            ErrorKind::Rejected => MyError::Unauthorized,   // 401
+            ErrorKind::Unavailable => MyError::Unavailable, // 503
+            ErrorKind::Misconfigured => MyError::Internal,  // 500
+        }
+    }
+}
+
 // Per sign-in. `identity_token` and `authorization_code` come from the app's
 // ASAuthorizationAppleIDCredential; `expected_nonce` is the single-use value
 // your server issued for this attempt.
-// `?` hands back your own MyError: a failed lookup exactly as you returned
-// it, idunn's own failures converted by your From<SignInError> for MyError,
-// where err.kind() says how to answer: Rejected (401), Unavailable (503) or
-// Misconfigured (500).
+// Errors come back as your own MyError: a failed lookup unchanged, idunn's
+// own failures through the From impl above.
 let outcome = apple
     .sign_up_or_log_in(
         &identity_token,
