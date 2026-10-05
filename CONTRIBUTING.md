@@ -45,6 +45,11 @@ check is a security bug rather than a cosmetic one.
 The project uses [`just`](https://github.com/casey/just) for its dev commands;
 see the `justfile` for the full list.
 
+On a fresh clone, run `just install-hooks` once. It makes every commit run the
+same `cargo fmt --all --check` as CI, so an unformatted commit is refused
+instead of failing the CI `fmt` job later. (The devcontainer does this on
+creation.)
+
 ```sh
 cargo test                # tests (dev-dependencies force the `reqwest` feature on)
 just clippy               # clippy over all targets and non-crypto features, warnings denied

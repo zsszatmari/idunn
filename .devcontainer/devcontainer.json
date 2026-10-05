@@ -2,5 +2,6 @@
   "name": "idunn",
   "build": { "dockerfile": "Dockerfile" },
   "remoteUser": "dev",
-  "updateRemoteUserUID": true
+  "updateRemoteUserUID": true,
+  "postCreateCommand": "just install-hooks"
 }

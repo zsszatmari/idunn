@@ -1,0 +1,12 @@
+#!/bin/sh
+# Same check as the CI fmt job, so an unformatted tree never becomes a commit.
+# Checks the working tree, not the index: a partially staged file is judged by its
+# on-disk content. Bypass deliberately with `git commit --no-verify`.
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found; install the Rust toolchain or commit with --no-verify" >&2
+    exit 1
+fi
+if ! cargo fmt --all --check; then
+    echo "pre-commit: formatting differs from rustfmt; run 'cargo fmt --all', re-stage, and commit again" >&2
+    exit 1
+fi

@@ -31,6 +31,10 @@ clippy:
 
 check-all: check-powerset test-features test-minimal-versions
 
+# One-time per clone: run the versioned hooks in .githooks/ (rustfmt check before each commit).
+install-hooks:
+    git config core.hooksPath .githooks
+
 # Local HTML coverage report, opened in the browser.
 coverage: cargo-deny cooldown
     @rustup run nightly true 2>/dev/null \
