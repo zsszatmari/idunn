@@ -54,7 +54,7 @@ impl<T: HttpGet> JwksStore<T> {
 
     /// Returns the decoding key Apple published for `kid`, fetching/refreshing
     /// the cached key set if needed. Concurrent misses share one in-flight
-    /// fetch via `network_request_mutex` instead of each hitting Apple.
+    /// fetch via `network_request_mutex`.
     pub async fn get_key(&self, kid: &str) -> Result<DecodingKey, VerificationError> {
         // A cached key short-circuits here while the snapshot is still fresh,
         // and — thanks to `stale_key_grace_period` — for a while after it goes
@@ -77,10 +77,9 @@ impl<T: HttpGet> JwksStore<T> {
         match self.key_set.load().as_ref() {
             Some(cached) if cached.fetched_at.elapsed() >= self.config.max_key_age => {
                 // Refresh has been failing long enough that the snapshot is
-                // now older than `max_key_age`. Fail closed rather than keep
-                // trusting keys Apple may have revoked in the meantime, and
-                // log loudly so the outage is visible instead of silently
-                // degrading verification.
+                // now older than `max_key_age`. Fail closed: keys Apple may
+                // have revoked in the meantime must not stay trusted. Log
+                // loudly so the outage is visible.
                 tracing::error!(
                     snapshot_age = ?cached.fetched_at.elapsed(),
                     max_key_age = ?self.config.max_key_age,
@@ -99,10 +98,8 @@ impl<T: HttpGet> JwksStore<T> {
                 // kid genuinely absent from the snapshot we have. A fetch
                 // newer than `refresh_interval` is confident evidence it is
                 // truly not there; an older (or never-completed) one leaves us
-                // unsure. Note this is `refresh_interval`, not the wider
-                // grace-period bound: the grace period only governs when a
-                // cached kid stops short-circuiting, not how far we trust a
-                // "not found".
+                // unsure. The bound is `refresh_interval`; the grace period
+                // only governs when a cached kid stops short-circuiting.
                 if cached.fetched_at.elapsed() < self.config.refresh_interval {
                     Err(VerificationError::InvalidToken(
                         InvalidTokenCause::InvalidKeyId {
@@ -174,8 +171,8 @@ impl<T: HttpGet> JwksStore<T> {
     }
 
     /// True when a snapshot exists but its last successful fetch is older than
-    /// `max_key_age` — the hard cap past which the whole snapshot is refused,
-    /// as opposed to `past_grace_period`, which only governs when a cached-kid
+    /// `max_key_age` — the hard cap past which the whole snapshot is refused.
+    /// `past_grace_period` is separate: it only governs when a cached-kid
     /// lookup stops short-circuiting the refresh.
     fn snapshot_past_max_age(&self) -> bool {
         self.key_set
@@ -546,7 +543,7 @@ mod tests {
 
         // The refresh interval has elapsed, so get_key attempts a refresh —
         // which fails. The kid-1 entry from the earlier successful fetch must
-        // still be returned rather than treated as gone.
+        // still be returned.
         let key_after_failed_refresh = store.get_key("kid-1").await.unwrap();
         assert_eq!(transport.call_count(), 2);
         assert_eq!(key_after_failed_refresh.family(), key.family());
@@ -577,8 +574,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         // The snapshot holding kid-1 is now older than max_key_age and the
-        // refresh attempt fails, so even a kid we still hold must be refused
-        // rather than verified against a key set Apple may have revoked from.
+        // refresh attempt fails, so even a kid we still hold must be refused:
+        // Apple may have revoked keys from this key set.
         let result = store.get_key("kid-1").await;
         assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 2);
@@ -696,9 +693,9 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
 
         // kid-2 was never in any snapshot; the refresh attempt fails, so this
-        // must be reported as "can't verify" (inconclusive), not "invalid
-        // kid" (confidently absent) — that distinction is only trustworthy
-        // after a fresh, successful fetch.
+        // must be reported as "can't verify" (inconclusive); "invalid kid"
+        // (confidently absent) is only trustworthy after a fresh, successful
+        // fetch.
         let result = store.get_key("kid-2").await;
         assert!(matches!(result, Err(VerificationError::CannotVerifyToken)));
         assert_eq!(transport.call_count(), 2);

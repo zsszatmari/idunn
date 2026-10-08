@@ -5,7 +5,7 @@ test-minimal-versions:
 # aws_lc_rs/rust_crypto are mutually exclusive and one of them is required (see the
 # compile_error! in lib.rs); the four recipes below all pass
 # --mutually-exclusive-features/--at-least-one-of to cargo-hack so they skip the
-# now-invalid zero- or two-backend combinations.
+# zero- or two-backend combinations, which the guard rejects.
 
 # test-fixtures/tokio-refresh don't get a standalone run here: a standalone run also
 # needs a backend. check-powerset-full's full powerset still covers them.

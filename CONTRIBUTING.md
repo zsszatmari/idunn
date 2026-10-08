@@ -38,7 +38,7 @@ understanding the code is.
 
 This matters more than usual for this crate: `idunn` handles authentication
 credentials and token verification, where a plausible-looking but subtly wrong
-check is a security bug rather than a cosmetic one.
+check is a security bug.
 
 ## Before you open a pull request
 
@@ -47,7 +47,7 @@ see the `justfile` for the full list.
 
 On a fresh clone, run `just install-hooks` once. It makes every commit run the
 same `cargo fmt --all --check` as CI, so an unformatted commit is refused
-instead of failing the CI `fmt` job later. (The devcontainer does this on
+before the CI `fmt` job sees it. (The devcontainer does this on
 creation.)
 
 ```sh
@@ -63,15 +63,14 @@ cargo test -- --ignored real_apple  # live Apple contract tests (network)
 Guidelines for the change itself:
 
 - Keep the public API documented. Public items carry doc comments explaining
-  what a caller is guaranteed, not just what the code does.
+  what a caller is guaranteed.
 - New behaviour needs tests. Security-relevant behaviour (signature checks,
-  claim validation, redaction of secrets) needs tests for the *rejection* path,
-  not only the happy path.
+  claim validation, redaction of secrets) needs tests for the *rejection* path
+  as well as the happy path.
 - Never log or `Debug`-print token or key material; the existing redaction
   tests are there to keep that true.
 - If a change encodes a non-obvious design decision, add the reasoning to
-  [`docs/architecture.md`](docs/architecture.md) rather than burying it in a
-  commit message.
+  [`docs/architecture.md`](docs/architecture.md), where later readers find it.
 - Keep commits focused, with a message that explains *why* the change is being
   made.
 

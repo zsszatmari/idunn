@@ -33,7 +33,7 @@ rust_crypto = ["jsonwebtoken/rust_crypto"]
 # AppleAuthClient without committing a second throwaway key. dev-dependencies only.
 test-fixtures = []
 # Background JWKS-refresh convenience: `AppleAuthClient::with_background_refresh`.
-# Off by default — the runtime choice belongs to the binary, not the library. The
+# Off by default — the runtime choice belongs to the binary. The
 # runtime-agnostic `keystore_refresh_loop()` is available without this feature.
 tokio-refresh = ["dep:tokio"]
 

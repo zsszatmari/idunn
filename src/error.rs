@@ -105,8 +105,8 @@ pub struct InvalidPrivateKeyError(#[from] pub(crate) jsonwebtoken::errors::Error
 /// Signing the client secret sent with every token-exchange/revoke request
 /// failed. In practice this should be unreachable — the private key is
 /// already validated once at `AppleAuthClient::new`/`with_transport` — but
-/// `jsonwebtoken::encode` is itself fallible, so this stays a real error
-/// rather than a `panic!`/`unwrap()`.
+/// `jsonwebtoken::encode` is itself fallible, so it is returned as a real
+/// error.
 #[derive(Debug, Error)]
 #[error("failed to sign client secret: {0}")]
 pub struct ClientSecretError(#[from] jsonwebtoken::errors::Error);
@@ -206,7 +206,7 @@ pub struct PendingRevocation {
     /// How long the host must wait, at minimum, before actually revoking
     /// this token — gives a fast retry a chance to land in
     /// `AppleAccounts::lookup` and cancel this pending revocation first (see
-    /// docs/usage.md, obligation 3). Fixed by idunn, not configurable;
+    /// docs/usage.md, obligation 3). Fixed by idunn;
     /// add it to your own clock when filing the job (e.g. `NOW() +
     /// grace_period` or your storage's equivalent).
     pub grace_period: Duration,
@@ -228,7 +228,7 @@ pub enum SignInError {
     #[error(transparent)]
     Exchange(#[from] TokenExchangeError),
 
-    /// After token exchange it turned out that the exchanged `id_token` names a
+    /// Reported after token exchange: the exchanged `id_token` names a
     /// different Apple user than the caller's identity token — someone else's authorization
     /// code paired with this identity token, possibly a malicious client. That user's refresh
     /// token was discarded: revoking would end their whole authorization of this app. Nothing

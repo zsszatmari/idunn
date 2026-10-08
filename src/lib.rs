@@ -5,7 +5,7 @@
 // https://developer.apple.com/support/offering-account-deletion-in-your-app/
 
 // jsonwebtoken can't auto-select a CryptoProvider when both backends are enabled, and has
-// none to use when neither is: either case panics at first use rather than failing to build.
+// none to use when neither is: either case panics at first use.
 // See "Why exactly one crypto backend is enforced at compile time" in docs/architecture.md.
 #[cfg(all(feature = "aws_lc_rs", feature = "rust_crypto"))]
 compile_error!(
@@ -61,7 +61,7 @@ const MIN_REFRESH_DELAY: Duration = Duration::from_secs(1);
 
 /// The minimum time a host must wait before revoking a token handed to
 /// `schedule_revocation` — see `PendingRevocation::grace_period`. Fixed here so
-/// every host gets the same answer instead of picking its own number.
+/// every host gets the same answer.
 const REVOCATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
 
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
@@ -213,7 +213,7 @@ pub struct AppleAuthClient<T: HttpTransport, N: NonceRequirement = Strict> {
     identity_verification: Arc<identity_verification::IdentityVerificationClient<T>>,
     credentials: Arc<Credentials>,
     transport: T,
-    // `fn() -> N` rather than `N`: keeps this field `Send + Sync + Clone + Copy`
+    // `fn() -> N` keeps this field `Send + Sync + Clone + Copy`
     // unconditionally, so `#[derive(Clone)]` above never demands `N: Clone` — `N`
     // is a zero-sized marker type (`Strict`/`Permissive`), never a stored value.
     _nonce_requirement: PhantomData<fn() -> N>,
@@ -277,12 +277,11 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// `refresh_keystore()` in a loop, sleeping between calls with the
     /// caller-supplied `sleep`. The first tick runs immediately, before any
     /// sleep, so awaiting this future (or spawning it) warms a cold cache
-    /// right away instead of leaving the first `get_key()` to pay the fetch
-    /// latency. The loop never sleeps for less than one second, even if the
+    /// right away and the first `get_key()` pays no fetch latency. The loop never sleeps for less than one second, even if the
     /// configured `VerificationConfig` would otherwise suggest less — see
     /// `MIN_REFRESH_DELAY`.
     ///
-    /// The `use<T, N, S, Fut>` is load-bearing, not decorative: edition 2024
+    /// The `use<T, N, S, Fut>` is load-bearing: edition 2024
     /// return-position `impl Trait` captures every type/lifetime parameter in
     /// scope by default, including `&self`'s anonymous lifetime. Without
     /// naming the precise capture set here, the returned future would be tied
@@ -290,9 +289,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// (`tokio::spawn` requires `'static`). Listing every type parameter
     /// (`N` included, even though the future stores nothing of type `N`) but
     /// no lifetime is what opts the borrow of `self` back out — that's the
-    /// whole point of writing it out explicitly instead of just adding
-    /// `+ 'static`, which would conflict with the implicitly-captured
-    /// `&self` lifetime instead of removing it.
+    /// whole point of writing it out explicitly. Adding `+ 'static` would
+    /// conflict with the implicitly-captured `&self` lifetime.
     fn keystore_refresh_loop<S, Fut>(
         &self,
         sleep: S,
@@ -312,8 +310,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
                 // Dropped before sleeping: holding a strong reference across
                 // the sleep would mean the last live clone being dropped
                 // during that sleep goes unnoticed until the *next* tick's
-                // `upgrade()` — delaying, not preventing, task exit, but
-                // needlessly.
+                // `upgrade()` — task exit is delayed needlessly.
                 drop(verification);
                 let _ = sleep(delay.max(MIN_REFRESH_DELAY)).await;
             }
@@ -330,14 +327,14 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// tokens agree on the nonce and the Apple user — the full, safe path for a
     /// typical Sign in with Apple flow. The code is exchanged on **every**
     /// sign-in, so a user who revoked the app in their Apple ID settings and
-    /// signed in again gets the new authorization's token instead of keeping a
-    /// dead one.
+    /// signed in again gets the new authorization's token, replacing the dead
+    /// one.
     ///
     /// `nonce_checker` gets the token's `nonce` claim verbatim (`None` only
     /// under `NoncePolicy::Permissive`), called exactly once, for
     /// `identity_token`. `Ok(false)` is a mismatch (`SignInError::NonceMismatch`);
     /// `Err(e)` means the check itself failed (e.g. a database lookup) and is
-    /// returned as-is — it is already your `A::Error` — rather than reported as
+    /// returned as-is — it is already your `A::Error` — and never reported as
     /// a false mismatch. After the exchange, this method compares the
     /// exchanged `id_token`'s nonce against the identity token's
     /// already-accepted nonce with `nonce_eq` — see docs/architecture.md, "Why
@@ -357,8 +354,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     ///   stored token handed back. Apple *refusing* the code
     ///   (`ErrorKind::Rejected`) fails the sign-in; so does a nonce mismatch.
     ///
-    /// `Err(e)` from `lookup` is returned as-is — a lookup failure, not a verdict
-    /// that the account doesn't exist.
+    /// `Err(e)` from `lookup` is returned as-is — a lookup failure says nothing
+    /// about whether the account exists.
     ///
     /// **Errors.** The error type is your own `A::Error`
     /// (`AppleAccounts::Error`): your hooks' errors pass through unchanged, and
@@ -382,7 +379,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// `SignInError::RejectedAfterExchange(cause)`. For a new authorization it
     /// first hands a [`PendingRevocation`] — the token, the verified identity,
     /// the cause, and a fixed `grace_period` — to `accounts.schedule_revocation`
-    /// and awaits it. The hook must file the token durably rather than revoke it
+    /// and awaits it. The hook must file the token durably and must not revoke it
     /// inline, per docs/usage.md, "The `AppleAccounts` contract"; it returns
     /// `()` — a failure to file is the hook's own to log. For a refresh the new
     /// token is dropped, never revoked: revoking is authorization-scoped and
@@ -392,7 +389,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// through `schedule_revocation`" and "Why a refreshed token replaces the
     /// stored one and is never revoked".
     // See docs/architecture.md: "Why the nonce checker is
-    // `FnOnce(Option<String>) -> Fut`, not `AsyncFn`" — only `nonce_checker`
+    // `FnOnce(Option<String>) -> Fut`" — only `nonce_checker`
     // follows that reasoning. The two storage hooks are `AppleAccounts`
     // methods, see "Why the account hooks are one `AppleAccounts` trait".
     pub async fn sign_up_or_log_in_with_nonce_checker<F, Fut, A>(
@@ -929,8 +926,8 @@ mod tests {
         }
     }
 
-    /// A clone must share the JWKS cache **and** the fetch rate limiter, not get
-    /// its own. With shared state the 60s default `cooldown_period` suppresses
+    /// A clone must share the JWKS cache **and** the fetch rate limiter.
+    /// With shared state the 60s default `cooldown_period` suppresses
     /// the clone's refresh and the transport sees exactly one fetch; if a clone
     /// duplicated the state it would be two. This assertion is what pins the
     /// per-field `Arc` design against an accidental un-`Arc` of a field.
@@ -1017,8 +1014,7 @@ mod tests {
 
     /// Verifies a client secret the way Apple would: valid ES256 signature under
     /// the test key pair, and `iss`/`sub` matching `test_token_config()` — i.e.
-    /// that `AppleAuthClient` signed with *its own* credentials, not some other
-    /// key or config.
+    /// that `AppleAuthClient` signed with *its own* credentials.
     fn assert_client_secret_matches_config(client_secret: &str) {
         #[derive(Deserialize)]
         struct Claims {
@@ -1066,7 +1062,7 @@ mod tests {
     }
 
     /// Pins that the audience checked against a token is `AppleAuthClient`'s own
-    /// `token_config.client_id`, not some other value: the token here is signed
+    /// `token_config.client_id`: the token here is signed
     /// for the config's original `client_id`, but the client is built from a
     /// config whose `client_id` was changed afterwards, so verification must fail.
     #[tokio::test]
@@ -1411,8 +1407,8 @@ mod tests {
     /// frame on the success path too — so `SignInError` must stay under clippy's
     /// 128-byte `result_large_err` budget or it inflates every host's error.
     /// `RejectedAfterExchange` carries `PostExchangeRejection` unboxed — the live
-    /// token and its `grace_period` go to `schedule_revocation`, not into the
-    /// error, so nothing large rides along.
+    /// token and its `grace_period` go to `schedule_revocation` and stay out of
+    /// the error, so nothing large rides along.
     #[test]
     fn sign_in_error_stays_small() {
         assert!(std::mem::size_of::<SignInError>() <= 128);
@@ -1505,8 +1501,7 @@ mod tests {
     }
 
     /// An exchanged `id_token` carrying a nonce the identity token lacked is a
-    /// mismatch, not a silent pass — nothing was accepted to compare it
-    /// against.
+    /// mismatch: nothing was accepted to compare it against.
     #[tokio::test]
     async fn permissive_sign_up_or_log_in_rejects_an_exchanged_nonce_the_identity_token_lacked() {
         let (client, identity_token, _transport) =
@@ -1666,8 +1661,8 @@ mod tests {
         assert_eq!(posts[0].0, "https://appleid.apple.com/auth/token");
     }
 
-    /// A foreign authorization code carries the thief's own nonce, not the
-    /// caller's — pins that the subject check runs before the nonce check, so
+    /// A foreign authorization code carries the thief's own nonce, so this
+    /// pins that the subject check runs before the nonce check, so
     /// it's always classified as `SubjectMismatch`, never `RejectedAfterExchange`,
     /// and nothing is scheduled.
     #[tokio::test]
@@ -1749,7 +1744,7 @@ mod tests {
 
     /// Every sign-in spends the code, so a known user whose stored token went
     /// dead (the app revoked in Apple ID settings) gets the new authorization's
-    /// token instead of keeping the dead one.
+    /// token, replacing the dead one.
     #[tokio::test]
     async fn logs_in_with_a_refreshed_token_when_one_is_on_file() {
         let (client, identity_token, transport) =
@@ -1822,8 +1817,8 @@ mod tests {
         assert_eq!(refresh_token, "stored-rt");
     }
 
-    /// Apple refusing the code itself is a verdict on this sign-in, not an
-    /// outage: falling back to the stored token would log in with a code Apple
+    /// Apple refusing the code itself is a verdict on this sign-in:
+    /// falling back to the stored token would log in with a code Apple
     /// says is bad.
     #[tokio::test]
     async fn fails_a_known_users_sign_in_when_apple_rejects_the_code() {
@@ -2022,10 +2017,9 @@ mod tests {
         /// Wires `client` up to a fake, immediately-resolving `sleep` that
         /// records every requested duration into `recorded` and, once
         /// `iterations` durations have been recorded, drops `client` — its
-        /// last strong reference, since `client` is moved in here rather than
-        /// cloned — so the loop's next `Weak::upgrade()` fails and it
+        /// last strong reference, since `client` is moved in here — so the loop's next `Weak::upgrade()` fails and it
         /// returns. This is what lets a test await the returned future to
-        /// completion instead of needing to time out or abort a task.
+        /// completion without a timeout or an abort.
         fn recording_loop<T: HttpTransport, N: NonceRequirement>(
             client: AppleAuthClient<T, N>,
             iterations: usize,
@@ -2065,7 +2059,7 @@ mod tests {
 
             // A sleep that never resolves: proves the fetch that produced
             // `get_calls() == 1` happened *before* the loop ever reached its
-            // first sleep, not concurrently with it.
+            // first sleep.
             let task = tokio::spawn(
                 client.keystore_refresh_loop(|_: Duration| std::future::pending::<()>()),
             );
@@ -2118,7 +2112,7 @@ mod tests {
             // MIN_REFRESH_DELAY floor this would be a busy loop hammering
             // Apple. `get_calls()` is deliberately not asserted here: with a
             // zero-cadence config it grows on every iteration by design, and
-            // the floor is what this test is pinning, not the fetch count.
+            // the floor is what this test pins.
             let recorded = Arc::new(StdMutex::new(Vec::new()));
             recording_loop(client, 5, recorded.clone()).await;
 

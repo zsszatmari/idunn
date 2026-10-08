@@ -35,8 +35,7 @@ mod sealed {
 /// `AppleAuthClient::sign_up_or_log_in` compares a token's `nonce`
 /// claim against one fixed expected value, which a `NoncePolicy::Permissive`
 /// token may legitimately not carry at all. This type parameter makes that
-/// method absent — a compile error, not a runtime one — on a `Permissive`
-/// client. See docs/architecture.md ("Why the nonce policy is a type
+/// method absent — a compile error — on a `Permissive` client. See docs/architecture.md ("Why the nonce policy is a type
 /// parameter").
 ///
 /// Bounded by `'static` on top of `Sealed`: both implementors are zero-sized
@@ -56,13 +55,13 @@ pub trait NonceRequirement: sealed::Sealed + 'static {
 
 /// Type-level marker selecting [`NoncePolicy::Strict`]. Distinct from that enum
 /// variant — this is a type, used as `AppleAuthClient`'s second type parameter
-/// (its default), not a value.
+/// (its default).
 #[derive(Clone, Copy, Debug)]
 pub struct Strict;
 
 /// Type-level marker selecting [`NoncePolicy::Permissive`]. Distinct from that
 /// enum variant — this is a type, used as `AppleAuthClient`'s second type
-/// parameter, not a value. A client built with this marker has no
+/// parameter. A client built with this marker has no
 /// `sign_up_or_log_in` method; use
 /// `AppleAuthClient::sign_up_or_log_in_with_nonce_checker` with a checker that
 /// decides what a missing nonce means for your flow.

@@ -55,7 +55,7 @@ pub struct AppleEmail {
     pub address: String,
     /// Apple's `email_verified` claim. `false` when the claim is absent — Apple
     /// documents it as `false` for Sign in with Apple at Work & School users,
-    /// so absence is treated as "not verified" rather than as unknown.
+    /// so absence is treated as "not verified".
     pub verified: bool,
     /// Whether `address` is one of Apple's private relay proxy addresses.
     /// Taken from the `is_private_email` claim when present; when the claim is
@@ -93,8 +93,8 @@ struct ApplePayload {
 }
 
 /// Apple sends `email_verified`/`is_private_email` as either a JSON Boolean or
-/// the strings `"true"`/`"false"`. This parses the value inside deserialization
-/// (rather than after `jsonwebtoken::decode`) so a malformed value surfaces as
+/// the strings `"true"`/`"false"`. This parses the value inside deserialization,
+/// so a malformed value surfaces as
 /// the same `InvalidTokenCause::Rejected` a missing required claim does,
 /// through jsonwebtoken's own JSON-error wrapping.
 fn deserialize_flexible_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>

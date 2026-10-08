@@ -32,8 +32,8 @@ impl AppleAccounts for MyAccounts {
 
     async fn schedule_revocation(&self, pending: PendingRevocation) {
         // Apple issued a live token for a new authorization that idunn then
-        // rejected. Store it durably for your revocation worker, not sooner
-        // than pending.grace_period from now.
+        // rejected. Store it durably for your revocation worker, to run no
+        // sooner than pending.grace_period from now.
         self.file_revocation(pending).await
     }
 }

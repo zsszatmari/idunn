@@ -11,12 +11,12 @@ const REVOKE_URL: &str = "https://appleid.apple.com/auth/revoke";
 /// Client secret is minted fresh for each request, so it only needs to live
 /// long enough to reach Apple's token endpoint.
 const CLIENT_SECRET_TTL_SECS: u64 = 300;
-// TODO: make this configurable through the public API instead of hardcoding it here.
+// TODO: make this configurable through the public API.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Credentials needed to authenticate as this app to Apple's token/revoke endpoints.
-/// Grouped as named fields rather than positional constructor args: team_id/key_id/
-/// client_id are all opaque strings and easy to transpose otherwise.
+/// Grouped as named fields because team_id/key_id/client_id are all opaque
+/// strings and easy to transpose as positional constructor args.
 ///
 /// Zeroizes every field on drop (`ZeroizeOnDrop`), including every `Clone` of it, so
 /// the `.p8` key is not left readable in freed memory — the `EncodingKey` idunn
@@ -43,16 +43,16 @@ pub struct AppleTokenConfig {
     ///
     /// This struct wipes its own copy (and every `Clone`'s) on drop, but that only
     /// helps if the caller doesn't keep a separate one: read the `.p8` straight
-    /// into the `Vec` handed to this field and move it in, rather than cloning it
-    /// off a long-lived config object or leaving the PEM sitting in a `String`
-    /// environment variable. And `Vec`'s zeroization is best-effort — a buffer
+    /// into the `Vec` handed to this field and move it in. A clone off a
+    /// long-lived config object, or the PEM left in a `String` environment
+    /// variable, is another copy this struct cannot wipe. And `Vec`'s zeroization is best-effort — a buffer
     /// that reallocated while being built may have left earlier bytes elsewhere on
     /// the heap, which nothing here can reach.
     pub private_key_pem: Vec<u8>,
 }
 
 impl std::fmt::Debug for AppleTokenConfig {
-    /// Hand-written, not derived: the identifier fields are non-secret (see
+    /// Hand-written: the identifier fields are non-secret (see
     /// their docs) and printed in full, but `private_key_pem` is shown only as
     /// a byte count so the key never reaches a log or panic message. Keeping
     /// this explicit also means a later `#[derive(Debug)]` can't silently
@@ -72,8 +72,8 @@ impl std::fmt::Debug for AppleTokenConfig {
 
 /// A refresh token issued by Apple.
 ///
-/// Wrapped rather than a bare `String` so it can't print live credential
-/// material through a derived `Debug` wherever it ends up — both
+/// A newtype around `String` so no derived `Debug` can print live credential
+/// material wherever the value ends up — both
 /// `SignInDetails::refresh_token` (a success value that might still be
 /// logged) and `CodeExchangeError::ExchangedTokenUnverified` (an error, which gets
 /// `{:?}`-printed into logs, `anyhow` chains and `unwrap()` panic messages by
@@ -114,8 +114,7 @@ pub(crate) struct ExchangedTokens {
 }
 
 /// Only `refresh_token`/`id_token` are captured: idunn doesn't use the access
-/// token or its `expires_in`, and `serde` ignores the unlisted fields rather
-/// than requiring them to be absent.
+/// token or its `expires_in`, and `serde` ignores the unlisted fields.
 #[derive(Deserialize)]
 struct RawTokenResponse {
     refresh_token: String,
@@ -247,7 +246,7 @@ zqbgw/e2HmOOuotg2tZP7JoBgnu7rNEplIygqTjYf8pKesYPyHrOj5ae\n\
 -----END PRIVATE KEY-----\n";
 
     /// EC public half matching `TEST_PRIVATE_KEY_PEM`, for tests that need to verify
-    /// a client secret idunn signed rather than just producing one.
+    /// a client secret idunn signed.
     pub const TEST_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDUkWXbQLEmRvKU7i4iuyXS1KIPzO\n\
 yM6m4MP3th5jjrqLYNrWT+yaAYJ7u6zRKZSMoKk42H/KSnrGD8h6zo+Wng==\n\
@@ -309,8 +308,7 @@ mod tests {
     struct FakeTransport {
         calls: Arc<Mutex<Vec<(String, String)>>>,
         // `Option` (not the bare `Result`) so `.take()` can move a non-`Clone`
-        // `TransportError::Network` out on the single call each test makes,
-        // rather than needing to clone the response on every call.
+        // `TransportError::Network` out on the single call each test makes.
         response: Arc<Mutex<Option<Result<String, TransportError>>>>,
     }
 
@@ -473,8 +471,8 @@ mod tests {
     /// Apple answering `invalid_grant` to a revoke means it no longer
     /// recognizes the token as a usable grant — already revoked, expired, or
     /// never valid. The call's purpose (the token can't be used) already
-    /// holds, so this is treated as success rather than pushed into a retry
-    /// loop that could never succeed.
+    /// holds, so this is treated as success (a retry loop could never
+    /// succeed).
     #[tokio::test]
     async fn treats_invalid_grant_as_a_successful_revocation() {
         let config = test_config();
@@ -519,7 +517,7 @@ mod tests {
     ///
     /// To see the exact bytes sent/received on the wire, run with:
     /// `RUST_LOG=reqwest=trace cargo test -- --ignored real_apple_revoke_endpoint --nocapture`
-    /// (uses reqwest's own built-in `connection_verbose` wire logging, not a custom dump).
+    /// (uses reqwest's own built-in `connection_verbose` wire logging).
     #[tokio::test]
     #[ignore = "calls Apple's live endpoint; run with `cargo test -- --ignored real_apple`"]
     async fn real_apple_revoke_endpoint_is_idempotent_for_an_unknown_token() {
@@ -540,16 +538,15 @@ mod tests {
 
     /// Hits Apple's real `/auth/revoke` endpoint with `client_secret` omitted entirely,
     /// to confirm `AppleErrorCode::from_response_body` actually recognizes the error
-    /// shape Apple returns in production for a malformed request (not just the shape we
-    /// assume in the fakes above). A bad token isn't reliable for this (see the sibling
+    /// shape Apple returns in production for a malformed request; the fakes above
+    /// only assume that shape. A bad token isn't reliable for this (see the sibling
     /// test above — Apple treats an unknown token as a no-op success), and empirically
     /// neither is a present-but-garbage `client_secret` (Apple accepted
     /// `"not-a-valid-jwt"` as one with a 200); a genuinely *missing* required parameter
     /// is Apple's documented `invalid_request` trigger, so this targets that instead.
     ///
     /// Ignored for the same reason as the sibling test above — this is a contract test
-    /// against Apple's live API, not against our own change; it runs in the weekly
-    /// `live-apple` workflow instead of on every PR.
+    /// against Apple's live API; it runs only in the weekly `live-apple` workflow.
     #[tokio::test]
     #[ignore = "calls Apple's live endpoint; run with `cargo test -- --ignored real_apple`"]
     async fn real_apple_revoke_endpoint_rejects_a_missing_client_secret() {
