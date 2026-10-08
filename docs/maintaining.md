@@ -14,7 +14,7 @@ Rejected alternative: moving the tests into `src/*_tests.rs` files, which cargo-
 
 ## Why CI runs what it runs
 
-CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`, `just doc`, `just doc-links`.
+CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`, `just doc`, `just doc-links` — plus `cargo package --locked`.
 
 The live Apple contract tests (`#[ignore]`d, `cargo test -- --ignored real_apple`) are deliberately excluded from PR CI. They depend on Apple's endpoints being reachable and behaving as documented, which is independent of whatever change is under review — a PR would fail or pass based on Apple's availability that day. `.github/workflows/live-apple.yml` runs them weekly (and on demand via `workflow_dispatch`) to catch drift in Apple's API or in the fakes' assumptions.
 
@@ -54,3 +54,11 @@ The two files live in `src/docs/` because rustdoc is their primary reader, the s
 - Heading anchors (`#why-…`) derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` for the old title and update the links.
 - `src/docs/architecture.md` has no top-level heading: rustdoc takes the module's summary line from the first block, so the intro paragraph comes first.
 - `just doc-links` excludes rustdoc's own source-view links (`.rs.html#12-14`): JavaScript creates those line anchors, so a static check cannot find them.
+
+## Why the package uses an include list
+
+`include` in `Cargo.toml` ships `src/`, the README and both licence files. Cargo's default would also ship every other tracked file (`docs/`, CI configuration, `justfile`, `deny.toml`), and untracked files such as local notes when they are not git-ignored. An allow-list keeps the published crate to what a user needs. `src/` covers `src/docs/*.md`, which `include_str!` needs at compile time.
+
+Tests are not shipped. The dev-dependency on the crate itself (which switches on `reqwest` and `tokio-refresh` for `cargo test`) is stripped from the published manifest, so the tests would not build from the package.
+
+The `package` CI job runs `cargo package --locked`, which builds the packaged crate in isolation. A file missing from `include` fails there, long before a release.

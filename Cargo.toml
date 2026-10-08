@@ -3,6 +3,11 @@ name = "idunn"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+description = "Sign in with Apple for Rust backends: verify identity tokens, exchange authorization codes and revoke refresh tokens."
+repository = "https://github.com/zsszatmari/idunn"
+keywords = ["apple", "sign-in-with-apple", "authentication", "jwt", "oauth"]
+categories = ["authentication", "web-programming"]
+include = ["/src", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [dependencies]
 arc-swap = "1.9.2"
