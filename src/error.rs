@@ -45,7 +45,7 @@ pub enum InvalidTokenCause {
 }
 
 /// Apple's documented `ErrorResponse.error` codes.
-/// https://developer.apple.com/documentation/signinwithapplerestapi/errorresponse
+/// <https://developer.apple.com/documentation/signinwithapplerestapi/errorresponse>
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AppleErrorCode {
     #[error("invalid_request: the request is malformed")]

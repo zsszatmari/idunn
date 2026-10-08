@@ -60,10 +60,8 @@ use subtle::ConstantTimeEq;
 const MIN_REFRESH_DELAY: Duration = Duration::from_secs(1);
 
 /// The minimum time a host must wait before revoking a token handed to
-/// `schedule_revocation` — see `PendingRevocation::grace_period`. Matches
-/// pergamen-server's own independently-chosen 5-minute practice
-/// (`enqueue_apple_revocation`); fixed here so every host gets the same
-/// answer instead of picking its own number.
+/// `schedule_revocation` — see `PendingRevocation::grace_period`. Fixed here so
+/// every host gets the same answer instead of picking its own number.
 const REVOCATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
 
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients

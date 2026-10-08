@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Identity extracted from a verified Apple identity token.
-/// for further info, see https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token
+/// for further info, see <https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token>
 #[derive(Clone, Debug)]
 pub struct AppleIdentity {
     /// Stable per-app-developer-team Apple user identifier (JWT `sub`).
