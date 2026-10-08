@@ -1,6 +1,6 @@
 //! Compiles only while idunn's public error enums, and `ErrorKind`, are
 //! exhaustive: a `#[non_exhaustive]` enum would force a wildcard arm on this
-//! crate-external code. See docs/architecture.md, "Why the error enums are
+//! crate-external code. See src/docs/architecture.md, "Why the error enums are
 //! exhaustive".
 
 use idunn::{

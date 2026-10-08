@@ -1,6 +1,6 @@
 # Maintaining idunn
 
-Why the tooling, CI and coverage setup looks the way it does. This is for contributors; the crate's design rationale is in [architecture.md](architecture.md).
+Why the tooling, CI and coverage setup looks the way it does. This is for contributors; the crate's design rationale is in [src/docs/architecture.md](../src/docs/architecture.md).
 
 ## Why coverage excludes test modules (and needs nightly)
 
@@ -24,7 +24,7 @@ A SHA pin is exact by design, so nothing moves it forward on its own — `.githu
 
 ## Why the feature-matrix recipes skip zero- and two-backend combinations
 
-This follows from the compile-time backend guard described in architecture.md, "Why exactly one crypto backend is enforced at compile time".
+This follows from the compile-time backend guard described in src/docs/architecture.md, "Why exactly one crypto backend is enforced at compile time".
 
 Every recipe that iterates feature combinations has to skip the zero- and two-backend states: the compile-time guard makes them fail to build. `check-features`, `check-powerset`, `check-powerset-full` and `test-features` (`justfile`) all pass `--mutually-exclusive-features aws_lc_rs,rust_crypto --at-least-one-of aws_lc_rs,rust_crypto` to cargo-hack; both flags require `--feature-powerset`, which `check-features` and `test-features` therefore use. `check-features` runs at `--depth 1`: each crypto backend compiles in isolation. `test-fixtures`/`tokio-refresh` don't get a standalone run in this recipe, because a standalone run also needs a backend; `check-powerset-full`'s full powerset still covers them.
 
@@ -46,10 +46,11 @@ docs.rs builds default features only, which would hide `ReqwestTransport`, `Appl
 
 ## Why the design rationale is an embedded module
 
-`docs/architecture.md` is part of the crate as `idunn::_architecture` (`#[doc = include_str!(...)]` on an empty `pub mod` in `src/lib.rs`), and the API docs and `docs/usage.md` link into its sections. The rationale on docs.rs therefore matches the published version, works offline, and rustdoc checks the module path of every link.
+`src/docs/architecture.md` is part of the crate as `idunn::_architecture` (`#[doc = include_str!(...)]` on an empty `pub mod` in `src/lib.rs`), and the API docs and `src/docs/usage.md` link into its sections. The rationale on docs.rs therefore matches the published version, works offline, and rustdoc checks the module path of every link.
+
+The two files live in `src/docs/` because rustdoc is their primary reader, the same standing as the `///` comments in `src/*.rs`. The README does not link them. Their intra-doc links are valid on docs.rs for every version at every moment; GitHub shows them as inert text, as it does in the doc comments.
 
 - The `_` prefix marks the module as no API. It is public, so cargo-semver-checks treats removing or renaming it as a breaking change; keep the name.
-- Heading anchors (`#why-…`) derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` and `docs/` for the old title and update the links.
-- The markdown is written for rustdoc. On GitHub the `crate::_architecture#…` links in `docs/usage.md` are dead, and `docs/architecture.md` renders without its intra-doc links. The README is the GitHub entry point; docs.rs is the reference.
-- `docs/architecture.md` has no top-level heading: rustdoc takes the module's summary line from the first block, so the intro paragraph comes first.
+- Heading anchors (`#why-…`) derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` for the old title and update the links.
+- `src/docs/architecture.md` has no top-level heading: rustdoc takes the module's summary line from the first block, so the intro paragraph comes first.
 - `just doc-links` excludes rustdoc's own source-view links (`.rs.html#12-14`): JavaScript creates those line anchors, so a static check cannot find them.

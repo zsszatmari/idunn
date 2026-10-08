@@ -1,13 +1,13 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-#![doc = include_str!("../docs/usage.md")]
+#![doc = include_str!("docs/usage.md")]
 // https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple
 // https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
 // https://developer.apple.com/support/offering-account-deletion-in-your-app/
 
 // jsonwebtoken can't auto-select a CryptoProvider when both backends are enabled, and has
 // none to use when neither is: either case panics at first use.
-// See "Why exactly one crypto backend is enforced at compile time" in docs/architecture.md.
+// See "Why exactly one crypto backend is enforced at compile time" in src/docs/architecture.md.
 #[cfg(all(feature = "aws_lc_rs", feature = "rust_crypto"))]
 compile_error!(
     "features \"aws_lc_rs\" and \"rust_crypto\" are mutually exclusive: enable exactly one \
@@ -48,7 +48,7 @@ pub use token_exchange::test_fixtures;
 // version-matched on docs.rs. The `_` prefix marks it as no API, but it is public, so
 // removing or renaming it is a breaking change. See docs/maintaining.md, "Why the design
 // rationale is an embedded module".
-#[doc = include_str!("../docs/architecture.md")]
+#[doc = include_str!("docs/architecture.md")]
 pub mod _architecture {}
 
 use jsonwebtoken::EncodingKey;
@@ -74,7 +74,7 @@ const REVOCATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
 
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
 /// that hex-encode in upper case, constant time protects a server-side-secret
-/// `expected_nonce` from a timing side channel — see docs/architecture.md for
+/// `expected_nonce` from a timing side channel — see src/docs/architecture.md for
 /// the limits of that protection. Used by `sign_up_or_log_in`, and internally
 /// by `sign_up_or_log_in_with_nonce_checker` to compare the exchanged
 /// `id_token`'s nonce against the identity token's already-accepted nonce.
@@ -399,7 +399,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// [Why `sign_up_or_log_in` never revokes, and discards another user's token](crate::_architecture#why-sign_up_or_log_in-never-revokes-and-discards-another-users-token),
     /// [Why a post-exchange rejection goes through `schedule_revocation`](crate::_architecture#why-a-post-exchange-rejection-goes-through-schedule_revocation)
     /// and [Why a refreshed token replaces the stored one and is never revoked](crate::_architecture#why-a-refreshed-token-replaces-the-stored-one-and-is-never-revoked).
-    // See docs/architecture.md: "Why the nonce checker is
+    // See src/docs/architecture.md: "Why the nonce checker is
     // `FnOnce(Option<String>) -> Fut`" — only `nonce_checker`
     // follows that reasoning. The two storage hooks are `AppleAccounts`
     // methods, see "Why the account hooks are one `AppleAccounts` trait".
@@ -468,12 +468,12 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         // Checked before the nonce: a stolen authorization code paired with the
         // caller's identity token carries the *thief's* own nonce, which would
         // otherwise be classified as an ordinary `NonceMismatch` and hand a
-        // stranger's token back for revocation. See docs/architecture.md.
+        // stranger's token back for revocation. See src/docs/architecture.md.
         if details.identity.apple_user_id != verified.identity.apple_user_id {
             return Err(SignInError::SubjectMismatch.into());
         }
 
-        // See docs/architecture.md, "Why the exchanged nonce is compared
+        // See src/docs/architecture.md, "Why the exchanged nonce is compared
         // against the identity token's".
         let nonces_match = match (verified.nonce.as_deref(), details.nonce.as_deref()) {
             (Some(expected), candidate) => nonce_eq(candidate, expected),
@@ -615,7 +615,7 @@ fn logged_in_with_stored_token(
 /// Only for a new authorization: the refresh token is live at Apple and
 /// deliberately left unrevoked by idunn — revoking is authorization-scoped and
 /// could tear down a concurrent sign-in for the same Apple user
-/// (docs/architecture.md, "Why revocations are coordinated by the host,
+/// (src/docs/architecture.md, "Why revocations are coordinated by the host,
 /// through `AppleAccounts`"). It goes to the host's
 /// `AppleAccounts::schedule_revocation` instead, awaited before the error is
 /// returned, so the error itself carries no token to lose — see "Why a
@@ -1572,7 +1572,7 @@ mod tests {
     /// An unverifiable exchanged `id_token` leaves a live refresh token behind
     /// that `sign_up_or_log_in` hands to `schedule_revocation`, and awaits,
     /// before returning — no revoke attempt — for the host to revoke after
-    /// the call returns. See docs/architecture.md, "Why revocations are
+    /// the call returns. See src/docs/architecture.md, "Why revocations are
     /// coordinated by the host, through `AppleAccounts`".
     #[tokio::test]
     async fn sign_up_or_log_in_schedules_revocation_for_an_unverifiable_exchanged_token() {
@@ -1647,7 +1647,7 @@ mod tests {
     /// Regression test for the identity-confusion gap this crate's
     /// `sign_up_or_log_in` closes: pairing one Apple user's identity token
     /// with an authorization code that resolves to a different Apple user.
-    /// The token is simply discarded: see docs/architecture.md, "Why
+    /// The token is simply discarded: see src/docs/architecture.md, "Why
     /// `sign_up_or_log_in` never revokes, and discards another user's token".
     /// Also pins that `SubjectMismatch` never calls `schedule_revocation`.
     #[tokio::test]

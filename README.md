@@ -82,7 +82,7 @@ match outcome {
 apple.revoke_refresh_token(&stored_refresh_token).await?;
 ```
 
-What `lookup` and `schedule_revocation` must guarantee, and how to run the revocation queue, is described in [docs/usage.md](docs/usage.md), "The `AppleAccounts` contract".
+What `lookup` and `schedule_revocation` must guarantee, and how to run the revocation queue, is described in the crate-level documentation on docs.rs, section "The `AppleAccounts` contract".
 
 ## Highlights 
 
@@ -91,7 +91,7 @@ What `lookup` and `schedule_revocation` must guarantee, and how to run the revoc
 - **Secrets that can't leak by accident.** Refresh tokens and private keys get hand-written, redacting `Debug` impls and zeroize-on-drop, so an `unwrap()` panic or a stray `{:?}` in a log line can't print a live credential.
 - **An injectable HTTP transport**, so you can bring your own HTTP client. reqwest is supported out of the box.
 
-What it deliberately does not do: store anything, decide who "owns" an Apple account, or coordinate concurrent sign-ins and revocations for the same user — that needs a shared view of your own application state, so it's your job, but it's guided by the `AppleAccounts` trait you implement. See [docs/usage.md](docs/usage.md) for that contract and [docs/architecture.md](docs/architecture.md) for the reasoning behind the crate's design.
+What it deliberately does not do: store anything, decide who "owns" an Apple account, or coordinate concurrent sign-ins and revocations for the same user — that needs a shared view of your own application state, so it's your job, but it's guided by the `AppleAccounts` trait you implement. The crate-level documentation on docs.rs describes that contract, and the `idunn::_architecture` module there explains the reasoning behind the crate's design.
 
 ## Getting started
 
@@ -102,9 +102,9 @@ Add the crate, pick a crypto backend feature (`aws_lc_rs`, the default, or `rust
 idunn = { version = "0.1", features = ["reqwest", "tokio-refresh"] }
 ```
 
-`tokio-refresh` adds `with_background_refresh`; without it, see `with_refresh_loop` in [docs/usage.md](docs/usage.md).
+`tokio-refresh` adds `with_background_refresh`; without it, see `with_refresh_loop` in the crate-level documentation.
 
-The full API — constructors, `sign_up_or_log_in`, `verify_identity_token`, `exchange_authorization_code`, `revoke_refresh_token` — is documented on the crate's own rustdoc, generated from [docs/usage.md](docs/usage.md). Build it locally with `cargo doc --open`, or read it on docs.rs once published.
+The full API — constructors, `sign_up_or_log_in`, `verify_identity_token`, `exchange_authorization_code`, `revoke_refresh_token` — is documented in the crate's rustdoc. Build it locally with `cargo doc --open`, or read it on docs.rs once published.
 
 ## Contributing
 

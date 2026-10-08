@@ -70,7 +70,7 @@ Guidelines for the change itself:
 - Never log or `Debug`-print token or key material; the existing redaction
   tests are there to keep that true.
 - If a change encodes a non-obvious design decision, add the reasoning to
-  [`docs/architecture.md`](docs/architecture.md), where later readers find it.
+  [`src/docs/architecture.md`](src/docs/architecture.md), where later readers find it.
 - Keep commits focused, with a message that explains *why* the change is being
   made.
 
