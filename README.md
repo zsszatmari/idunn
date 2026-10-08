@@ -104,6 +104,8 @@ idunn = { version = "0.1", features = ["reqwest", "tokio-refresh"] }
 
 `tokio-refresh` adds `with_background_refresh`; without it, see `with_refresh_loop` in the crate-level documentation.
 
+The minimum supported Rust version is 1.88.
+
 The full API — constructors, `sign_up_or_log_in`, `verify_identity_token`, `exchange_authorization_code`, `revoke_refresh_token` — is documented in the crate's rustdoc. Build it locally with `cargo doc --open`, or read it on docs.rs once published.
 
 ## Contributing

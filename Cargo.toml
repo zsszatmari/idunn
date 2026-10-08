@@ -2,6 +2,10 @@
 name = "idunn"
 version = "0.1.0"
 edition = "2024"
+# jsonwebtoken 11 and the icu crates behind url set the floor (found with
+# `cargo msrv find --features reqwest,tokio-refresh`). Keep in sync with the
+# `msrv` job in .github/workflows/ci.yml.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Sign in with Apple for Rust backends: verify identity tokens, exchange authorization codes and revoke refresh tokens."
 repository = "https://github.com/zsszatmari/idunn"

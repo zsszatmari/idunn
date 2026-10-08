@@ -14,7 +14,7 @@ Rejected alternative: moving the tests into `src/*_tests.rs` files, which cargo-
 
 ## Why CI runs what it runs
 
-CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`, `just doc`, `just doc-links` — plus `cargo package --locked`.
+CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`, `just doc`, `just doc-links` — plus `cargo package --locked` and the `msrv` job (`cargo +1.88.0 check`).
 
 The live Apple contract tests (`#[ignore]`d, `cargo test -- --ignored real_apple`) are deliberately excluded from PR CI. They depend on Apple's endpoints being reachable and behaving as documented, which is independent of whatever change is under review — a PR would fail or pass based on Apple's availability that day. `.github/workflows/live-apple.yml` runs them weekly (and on demand via `workflow_dispatch`) to catch drift in Apple's API or in the fakes' assumptions.
 
@@ -62,3 +62,11 @@ The two files live in `src/docs/` because rustdoc is their primary reader, the s
 Tests are not shipped. The dev-dependency on the crate itself (which switches on `reqwest` and `tokio-refresh` for `cargo test`) is stripped from the published manifest, so the tests would not build from the package.
 
 The `package` CI job runs `cargo package --locked`, which builds the packaged crate in isolation. A file missing from `include` fails there, long before a release.
+
+## Why the MSRV is 1.88 and how it is checked
+
+`rust-version` is 1.88, the lowest version `cargo msrv find --features reqwest,tokio-refresh` accepts (measured on aarch64-apple-darwin, confirmed on aarch64-unknown-linux-gnu). `jsonwebtoken` 11 declares 1.88, and the `icu_*` crates behind `url`, plus `time`, declare it too. The `Cargo.lock` versions set the floor and the MSRV follows them; the lockfile is not downgraded to lower it.
+
+The `msrv` CI job installs exactly 1.88.0 and runs `cargo check --locked` with `reqwest` and `tokio-refresh` on. It checks the library only (no `--all-targets`), because the dev-dependencies and test code may use newer features than the library promises. The version appears in `Cargo.toml` and in the job; change them together.
+
+Raising the MSRV bumps the minor version, as the README states. After a dependency update, a failing `msrv` job means the update raised the floor: either pin the dependency to a version that supports 1.88 or raise `rust-version` in both places.
