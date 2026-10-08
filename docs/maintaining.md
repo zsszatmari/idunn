@@ -14,7 +14,7 @@ Rejected alternative: moving the tests into `src/*_tests.rs` files, which cargo-
 
 ## Why CI runs what it runs
 
-CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`, `just doc`.
+CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`, `just doc`, `just doc-links`.
 
 The live Apple contract tests (`#[ignore]`d, `cargo test -- --ignored real_apple`) are deliberately excluded from PR CI. They depend on Apple's endpoints being reachable and behaving as documented, which is independent of whatever change is under review — a PR would fail or pass based on Apple's availability that day. `.github/workflows/live-apple.yml` runs them weekly (and on demand via `workflow_dispatch`) to catch drift in Apple's API or in the fakes' assumptions.
 
@@ -43,3 +43,13 @@ docs.rs builds default features only, which would hide `ReqwestTransport`, `Appl
 - There are no `rustdoc-args`: docs.rs passes `--cfg docsrs` itself.
 - `#![cfg_attr(docsrs, feature(doc_cfg))]` produces the "Available on crate feature … only" badges. `doc_cfg` is nightly-only; `cfg(docsrs)` is set only by docs.rs and `just doc`, so stable builds never see the feature gate. The older `doc_auto_cfg` no longer exists; its behaviour is part of `doc_cfg`.
 - The feature list appears in both `Cargo.toml` and the `just doc` recipe. Change them together.
+
+## Why the design rationale is an embedded module
+
+`docs/architecture.md` is part of the crate as `idunn::_architecture` (`#[doc = include_str!(...)]` on an empty `pub mod` in `src/lib.rs`), and the API docs and `docs/usage.md` link into its sections. The rationale on docs.rs therefore matches the published version, works offline, and rustdoc checks the module path of every link.
+
+- The `_` prefix marks the module as no API. It is public, so cargo-semver-checks treats removing or renaming it as a breaking change; keep the name.
+- Heading anchors (`#why-…`) derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` and `docs/` for the old title and update the links.
+- The markdown is written for rustdoc. On GitHub the `crate::_architecture#…` links in `docs/usage.md` are dead, and `docs/architecture.md` renders without its intra-doc links. The README is the GitHub entry point; docs.rs is the reference.
+- `docs/architecture.md` has no top-level heading: rustdoc takes the module's summary line from the first block, so the intro paragraph comes first.
+- `just doc-links` excludes rustdoc's own source-view links (`.rs.html#12-14`): JavaScript creates those line anchors, so a static check cannot find them.

@@ -125,7 +125,8 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
-          tool: just
+          tool: just,lychee
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fetch --locked
       - run: just doc
+      - run: just doc-links

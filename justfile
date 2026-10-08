@@ -36,6 +36,12 @@ check-all: check-powerset test-features test-minimal-versions
 doc:
     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --no-deps --features reqwest,tokio-refresh
 
+# Checks the generated docs for broken links, including heading anchors, which rustdoc
+# does not validate. Source-view links (`.rs.html#12-14`) are excluded: JavaScript
+# creates their line anchors, so a static check cannot find them.
+doc-links: doc
+    lychee --offline --include-fragments --no-progress --exclude '\.rs\.html#' target/doc/idunn
+
 # One-time per clone: run the versioned hooks in .githooks/ (rustfmt check before each commit).
 install-hooks:
     git config core.hooksPath .githooks

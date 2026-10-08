@@ -35,8 +35,8 @@ mod sealed {
 /// `AppleAuthClient::sign_up_or_log_in` compares a token's `nonce`
 /// claim against one fixed expected value, which a `NoncePolicy::Permissive`
 /// token may legitimately not carry at all. This type parameter makes that
-/// method absent — a compile error — on a `Permissive` client. See docs/architecture.md ("Why the nonce policy is a type
-/// parameter").
+/// method absent — a compile error — on a `Permissive` client. See [Why the nonce
+/// policy is a type parameter](crate::_architecture#why-the-nonce-policy-is-a-type-parameter).
 ///
 /// Bounded by `'static` on top of `Sealed`: both implementors are zero-sized
 /// marker types with no lifetime parameter of their own, so this adds no real
@@ -86,8 +86,8 @@ impl NonceRequirement for Permissive {
 ///
 /// The nonce-presence policy lives on `AppleAuthClient`'s `N: NonceRequirement`
 /// type parameter (`Strict`/`Permissive`), so `sign_up_or_log_in`'s
-/// availability tracks it at compile time. See docs/architecture.md ("Why the
-/// nonce policy is a type parameter").
+/// availability tracks it at compile time. See [Why the nonce policy is a type
+/// parameter](crate::_architecture#why-the-nonce-policy-is-a-type-parameter).
 #[derive(Clone, Copy, Debug)]
 pub struct VerificationConfig {
     /// How long a successful fetch stays "fresh" before `get_key`'s lazy path

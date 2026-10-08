@@ -44,6 +44,13 @@ pub use transport::ReqwestTransport;
 #[cfg(feature = "test-fixtures")]
 pub use token_exchange::test_fixtures;
 
+// Docs-only module: it carries the design rationale so the links from the API docs stay
+// version-matched on docs.rs. The `_` prefix marks it as no API, but it is public, so
+// removing or renaming it is a breaking change. See docs/maintaining.md, "Why the design
+// rationale is an embedded module".
+#[doc = include_str!("../docs/architecture.md")]
+pub mod _architecture {}
+
 use jsonwebtoken::EncodingKey;
 use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
@@ -105,8 +112,8 @@ pub struct SignInDetails {
 /// What the caller found when looking up this Apple user. Every sign-in
 /// exchanges the authorization code; this decides what the exchange means —
 /// a refresh of the stored token or a new authorization — and what idunn can
-/// fall back to when Apple can't issue a new token. See docs/architecture.md,
-/// "Why every sign-in exchanges the authorization code".
+/// fall back to when Apple can't issue a new token. See
+/// [Why every sign-in exchanges the authorization code](crate::_architecture#why-every-sign-in-exchanges-the-authorization-code).
 #[derive(Debug, Clone)]
 pub enum AccountState {
     /// A refresh token is stored for this Apple user. This sign-in refreshes
@@ -134,7 +141,8 @@ pub enum SignInOutcome {
         refresh_token: RefreshToken,
     },
     /// A new authorization. Store `refresh_token`; if storing fails, schedule
-    /// it for revocation (docs/usage.md, obligation 5), or the authorization
+    /// it for revocation ([The `AppleAccounts` contract](crate#the-appleaccounts-contract),
+    /// obligation 5), or the authorization
     /// outlives the user's chance to delete it.
     SignedUp {
         identity: AppleIdentity,
@@ -156,10 +164,11 @@ impl SignInOutcome {
 }
 
 /// The host's account storage, as `sign_up_or_log_in` sees it: both storage
-/// hooks of a sign-in, on one type. The obligations are in docs/usage.md,
-/// "The `AppleAccounts` contract"; the reasoning in docs/architecture.md,
-/// "Why the account hooks are one `AppleAccounts` trait" and "Why sign-in
-/// returns the host's own error type". Implement it with `async fn`.
+/// hooks of a sign-in, on one type. The obligations are in
+/// [The `AppleAccounts` contract](crate#the-appleaccounts-contract); the reasoning in
+/// [Why the account hooks are one `AppleAccounts` trait](crate::_architecture#why-the-account-hooks-are-one-appleaccounts-trait)
+/// and [Why sign-in returns the host's own error type](crate::_architecture#why-sign-in-returns-the-hosts-own-error-type).
+/// Implement it with `async fn`.
 pub trait AppleAccounts: Sync {
     /// Your own error type, and what `sign_up_or_log_in` returns: `lookup`'s
     /// and `nonce_checker`'s errors come back exactly as you returned them, and
@@ -200,15 +209,16 @@ struct Credentials {
 /// tokens, for a single app identified by `AppleTokenConfig::client_id`.
 ///
 /// One client with one constructor, covering both identity verification and token
-/// exchange even though they touch mostly-disjoint code (see `identity.rs` /
-/// `token.rs`): see docs/architecture.md for why they're bundled together.
+/// exchange even though they touch mostly-disjoint code. See
+/// [Why `AppleAuthClient` is one client with one constructor](crate::_architecture#why-appleauthclient-is-one-client-with-one-constructor)
+/// for why they're bundled together.
 /// Clonable by design.
 ///
 /// `N: NonceRequirement` (default `Strict`) fixes the `NoncePolicy`
 /// identity-token verification enforces, and whether
 /// `sign_up_or_log_in` exists on this client — see
-/// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
-/// type parameter").
+/// [`NonceRequirement`] and
+/// [Why the nonce policy is a type parameter](crate::_architecture#why-the-nonce-policy-is-a-type-parameter).
 #[derive(Clone)]
 pub struct AppleAuthClient<T: HttpTransport, N: NonceRequirement = Strict> {
     identity_verification: Arc<identity_verification::IdentityVerificationClient<T>>,
@@ -338,8 +348,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// returned as-is — it is already your `A::Error` — and never reported as
     /// a false mismatch. After the exchange, this method compares the
     /// exchanged `id_token`'s nonce against the identity token's
-    /// already-accepted nonce with `nonce_eq` — see docs/architecture.md, "Why
-    /// the exchanged nonce is compared against the identity token's".
+    /// already-accepted nonce with `nonce_eq` — see
+    /// [Why the exchanged nonce is compared against the identity token's](crate::_architecture#why-the-exchanged-nonce-is-compared-against-the-identity-tokens).
     ///
     /// `accounts.lookup` runs after the identity token and its nonce are
     /// verified, but before anything is spent at Apple. Its `AccountState`
@@ -381,14 +391,14 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// first hands a [`PendingRevocation`] — the token, the verified identity,
     /// the cause, and a fixed `grace_period` — to `accounts.schedule_revocation`
     /// and awaits it. The hook must file the token durably and must not revoke it
-    /// inline, per docs/usage.md, "The `AppleAccounts` contract"; it returns
-    /// `()` — a failure to file is the hook's own to log. For a refresh the new
-    /// token is dropped, never revoked: revoking is authorization-scoped and
-    /// would end the stored authorization too. The reasoning is in
-    /// docs/architecture.md, "Why `sign_up_or_log_in` never revokes, and
-    /// discards another user's token", "Why a post-exchange rejection goes
-    /// through `schedule_revocation`" and "Why a refreshed token replaces the
-    /// stored one and is never revoked".
+    /// inline, per [The `AppleAccounts` contract](crate#the-appleaccounts-contract);
+    /// it returns `()` — a failure to file is the hook's own to log. For a
+    /// refresh the new token is dropped, never revoked: revoking is
+    /// authorization-scoped and would end the stored authorization too. The
+    /// reasoning is in
+    /// [Why `sign_up_or_log_in` never revokes, and discards another user's token](crate::_architecture#why-sign_up_or_log_in-never-revokes-and-discards-another-users-token),
+    /// [Why a post-exchange rejection goes through `schedule_revocation`](crate::_architecture#why-a-post-exchange-rejection-goes-through-schedule_revocation)
+    /// and [Why a refreshed token replaces the stored one and is never revoked](crate::_architecture#why-a-refreshed-token-replaces-the-stored-one-and-is-never-revoked).
     // See docs/architecture.md: "Why the nonce checker is
     // `FnOnce(Option<String>) -> Fut`" — only `nonce_checker`
     // follows that reasoning. The two storage hooks are `AppleAccounts`
@@ -671,8 +681,8 @@ impl AppleAuthClient<transport::ReqwestTransport, Strict> {
 ///
 /// Named after the apples that keep the gods young in Norse myth (see
 /// README, "Why \"idunn\"?"): a seed has to be planted before it grows into
-/// a client. See docs/architecture.md, "Why the JWKS refresh strategy is
-/// chosen at construction".
+/// a client. See
+/// [Why the JWKS refresh strategy is chosen at construction](crate::_architecture#why-the-jwks-refresh-strategy-is-chosen-at-construction).
 #[must_use = "an AppleSeed becomes an AppleAuthClient only via with_background_refresh, with_refresh_loop or without_background_refresh"]
 pub struct AppleSeed<T: HttpTransport, N: NonceRequirement = Strict> {
     client: AppleAuthClient<T, N>,
@@ -691,9 +701,10 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// `idunn` has no runtime dependency of its own: `sleep` is how the
     /// caller supplies its own timer (e.g. `tokio::time::sleep`, or an
     /// `async-io`/`smol` equivalent) without idunn depending on any one
-    /// runtime. See docs/architecture.md ("Why the JWKS refresh strategy is
-    /// chosen at construction") for `with_background_refresh`, a thin
-    /// `tokio-refresh`-gated convenience layer built on top of this method.
+    /// runtime. See
+    /// [Why the JWKS refresh strategy is chosen at construction](crate::_architecture#why-the-jwks-refresh-strategy-is-chosen-at-construction)
+    /// for `with_background_refresh`, a thin `tokio-refresh`-gated convenience
+    /// layer built on top of this method.
     ///
     /// The returned future holds only a `Weak` reference to the returned
     /// client's shared state. It does not keep the client alive, and it
@@ -734,9 +745,10 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
 }
 
 /// Background JWKS-refresh convenience built on `AppleSeed::with_refresh_loop`.
-/// See docs/architecture.md ("Why the JWKS refresh strategy is chosen at
-/// construction") for why this takes a `Handle` as an explicit parameter,
-/// and why it sits behind the optional `tokio-refresh` feature. (`N:
+/// See
+/// [Why the JWKS refresh strategy is chosen at construction](crate::_architecture#why-the-jwks-refresh-strategy-is-chosen-at-construction)
+/// for why this takes a `Handle` as an explicit parameter, and why it sits
+/// behind the optional `tokio-refresh` feature. (`N:
 /// NonceRequirement` already implies `N: 'static`, which `handle.spawn`
 /// needs — see `NonceRequirement`'s doc in `config.rs`.)
 #[cfg(feature = "tokio-refresh")]
@@ -764,8 +776,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
 }
 
 /// `sign_up_or_log_in` exists only here, on a `Strict` client — see
-/// [`NonceRequirement`] and docs/architecture.md ("Why the nonce policy is a
-/// type parameter").
+/// [`NonceRequirement`] and
+/// [Why the nonce policy is a type parameter](crate::_architecture#why-the-nonce-policy-is-a-type-parameter).
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     /// `sign_up_or_log_in_with_nonce_checker` with a checker that compares the
     /// claim directly against `expected_nonce` — constant-time and ASCII-case-insensitive,

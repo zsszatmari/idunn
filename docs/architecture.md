@@ -1,4 +1,4 @@
-# Architecture
+The design decisions behind idunn's API, one section per decision: what was chosen, why, and which alternatives were rejected.
 
 ## Why `AppleAuthClient` is one client with one constructor
 
@@ -66,7 +66,7 @@ Rejected alternative: an `expected_nonce: &str` parameter on `verify_identity_to
 idunn does, however, enforce nonce *presence*, controlled by `NoncePolicy` (part of `VerificationConfig`):
 
 - `NoncePolicy::Strict` (the default): a token with no `nonce` claim is always `InvalidToken`, regardless of the token's `nonce_supported` claim. This is stricter than what Apple's docs technically require, chosen so replay protection is never silently disabled by a claim idunn has no way to verify the integrity of.
-- `NoncePolicy::Permissive`: follows the handling Apple's own docs suggest (https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token, `nonce_supported`) — a missing nonce is tolerated (`nonce` is `None`) only when `nonce_supported` is `false` or absent; a `nonce_supported: true` claim still fails the token even under this policy, since Apple's guidance is to treat the nonce as mandatory in that case.
+- `NoncePolicy::Permissive`: follows the handling Apple's own docs suggest (<https://developer.apple.com/documentation/signinwithapplejs/authorizationi/id_token>, `nonce_supported`) — a missing nonce is tolerated (`nonce` is `None`) only when `nonce_supported` is `false` or absent; a `nonce_supported: true` claim still fails the token even under this policy, since Apple's guidance is to treat the nonce as mandatory in that case.
 
 When `nonce` is `None` under `Permissive`, `AppleIdentity::issued_at`/`expiration` (from the token's `iat`/`exp` claims) are exposed so the caller can still build its own replay-detection window (e.g. dedupe on the token itself within that range).
 
@@ -101,7 +101,7 @@ This is a different axis from "Why `AppleAuthClient` is one client with one cons
 
 ## Why `sign_up_or_log_in` never revokes, and discards another user's token
 
-`sign_up_or_log_in` layers nonce and Apple-user matching on top of `verify_identity_token` and `exchange_authorization_code`. Once the code is exchanged, a rejection leaves a live refresh token that `sign_up_or_log_in`'s caller never asked for and cannot use — and idunn itself never calls `revoke_refresh_token` on that token. Apple's `/auth/revoke` is authorization-scoped (see "Why a refreshed token replaces the stored one and is never revoked" below): revoking this token could tear down a concurrent sign-in for the same Apple user, minted by another process at the same time. Discovering that and coordinating around it needs a shared view of who's signing in and who's revoking right now — something only the host can provide, through `AppleAccounts`. See "Why revocations are coordinated by the host, through `AppleAccounts`" below for the rationale, and docs/usage.md, "The `AppleAccounts` contract", for the obligations this places on the host.
+`sign_up_or_log_in` layers nonce and Apple-user matching on top of `verify_identity_token` and `exchange_authorization_code`. Once the code is exchanged, a rejection leaves a live refresh token that `sign_up_or_log_in`'s caller never asked for and cannot use — and idunn itself never calls `revoke_refresh_token` on that token. Apple's `/auth/revoke` is authorization-scoped (see "Why a refreshed token replaces the stored one and is never revoked" below): revoking this token could tear down a concurrent sign-in for the same Apple user, minted by another process at the same time. Discovering that and coordinating around it needs a shared view of who's signing in and who's revoking right now — something only the host can provide, through `AppleAccounts`. See "Why revocations are coordinated by the host, through `AppleAccounts`" below for the rationale, and [The `AppleAccounts` contract](crate#the-appleaccounts-contract), for the obligations this places on the host.
 
 Post-exchange rejection splits into two `SignInError` outcomes. When the exchanged `id_token` names a different Apple user than the caller's identity token — a stranger's authorization code paired with this identity token, possibly a stolen, single-use, short-lived code presented alongside someone else's stolen identity token — `sign_up_or_log_in` returns `SignInError::SubjectMismatch` and simply discards the token. It's never written to disk, so there's nothing an attacker could recover from it, and it belongs to an Apple user idunn's caller has no relationship with, so TN3194 imposes no obligation on it either. Revoking it would end that user's whole authorization of the app on the strength of a code the attacker could not have redeemed with their own client secret — exactly the capability an attacker wants and doesn't have. The subject is checked *before* the nonce for the same reason: a stolen code carries the thief's own nonce, and checking the nonce first would classify this case as an ordinary `NonceMismatch`, carrying the stranger's token back to the caller for revocation.
 
@@ -150,11 +150,11 @@ A *new* authorization is the opposite case: its token is the only handle on an a
 
 If the tokens are independent after all, the revoke at account deletion only invalidates the latest token, and the app may stay in the user's list. We accept that risk deliberately, to avoid storing an unbounded list of tokens. A related assumption is unverified too: that the Apple user id (`sub`) is stable across a revoke and re-authorization, which the host's token row is keyed on. A manual sandbox test with a real device checks both.
 
-**Known limitation, unsolved here:** nothing in idunn prevents a caller's own `revoke_refresh_token` call from racing a concurrent `sign_up_or_log_in` for the same Apple user. Since revoke is authorization-scoped, such a race could revoke a token the concurrent sign-in is in the middle of minting. This is a property of `revoke_refresh_token`'s semantics; `sign_up_or_log_in` adds nothing to it. On the host side, the per-user serialization described in docs/usage.md, "The `AppleAccounts` contract" (obligation 4), is the mitigation.
+**Known limitation, unsolved here:** nothing in idunn prevents a caller's own `revoke_refresh_token` call from racing a concurrent `sign_up_or_log_in` for the same Apple user. Since revoke is authorization-scoped, such a race could revoke a token the concurrent sign-in is in the middle of minting. This is a property of `revoke_refresh_token`'s semantics; `sign_up_or_log_in` adds nothing to it. On the host side, the per-user serialization described in [The `AppleAccounts` contract](crate#the-appleaccounts-contract) (obligation 4), is the mitigation.
 
 ## Why revocations are coordinated by the host, through `AppleAccounts`
 
-idunn has no persistence layer and no view of concurrent sign-ins or revocations — it sees one call at a time. Only the host, which stores the refresh tokens and can see every in-flight request, is in a position to coordinate them. `AppleAccounts::lookup` is the hook that carries this coordination: the obligations it places on the host are documented in docs/usage.md, "The `AppleAccounts` contract"; this section covers only why they belong there.
+idunn has no persistence layer and no view of concurrent sign-ins or revocations — it sees one call at a time. Only the host, which stores the refresh tokens and can see every in-flight request, is in a position to coordinate them. `AppleAccounts::lookup` is the hook that carries this coordination: the obligations it places on the host are documented in [The `AppleAccounts` contract](crate#the-appleaccounts-contract); this section covers only why they belong there.
 
 `AppleAccounts::lookup` is the only point in `sign_up_or_log_in` that runs with a verified Apple `sub` *before* the authorization code is spent. Knowing the `sub` this early is what makes a pending revocation for that `sub` cancellable in time, before any new token is minted. It also runs *after* the nonce check, so an unauthenticated request replaying a stolen identity token can't reach it and cancel a revocation it has no right to cancel.
 
@@ -272,7 +272,7 @@ Why `()`: the token has already moved into the hook by the time it could fail to
 
 Why the cause rides in both places: the hook needs it to record why a token was filed; the caller needs it to answer the request correctly (`SignInError::kind()` tells a JWKS outage, `TokenUnverified(CannotVerifyToken)`, apart from an actual token rejection). That's why `PostExchangeRejection`, `VerificationError` and `InvalidTokenCause` are `Clone` — the one clone happens only on this path.
 
-Why `grace_period` is a fixed field: the host shouldn't have to reinvent "how long is safe to wait" — idunn already knows the answer that makes `AppleAccounts::lookup`'s cancellation window work (docs/usage.md, obligation 3), so it hands it over as data (`PendingRevocation::grace_period`); prose documentation would rely on every host reading it. `REVOCATION_GRACE_PERIOD` (5 minutes) is not configurable.
+Why `grace_period` is a fixed field: the host shouldn't have to reinvent "how long is safe to wait" — idunn already knows the answer that makes `AppleAccounts::lookup`'s cancellation window work ([The `AppleAccounts` contract](crate#the-appleaccounts-contract), obligation 3), so it hands it over as data (`PendingRevocation::grace_period`); prose documentation would rely on every host reading it. `REVOCATION_GRACE_PERIOD` (5 minutes) is not configurable.
 
 Shape: `AppleAccounts::schedule_revocation`, a trait method next to `lookup` — see "Why the account hooks are one `AppleAccounts` trait".
 
@@ -280,7 +280,7 @@ Limits: the hook runs inside the caller's own future — if that future is dropp
 
 ## Why the account hooks are one `AppleAccounts` trait
 
-Both hooks are the host's storage and share one contract (docs/usage.md, "The `AppleAccounts` contract"), so one named type holds both. One trait needs one type parameter where closures would need four (`L, LFut, Q, QFut`), lets implementors write `async fn`, and lets the host pass a long-lived `&accounts`; two closures would need a pool cloned into each on every request.
+Both hooks are the host's storage and share one contract ([The `AppleAccounts` contract](crate#the-appleaccounts-contract)), so one named type holds both. One trait needs one type parameter where closures would need four (`L, LFut, Q, QFut`), lets implementors write `async fn`, and lets the host pass a long-lived `&accounts`; two closures would need a pool cloned into each on every request.
 
 `nonce_checker` stays a closure: it depends on per-request state (the expected nonce). Rejected: a nonce method on the trait, which would force per-request state into a type meant to live as long as the application.
 
