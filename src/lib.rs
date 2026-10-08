@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![doc = include_str!("../docs/usage.md")]
 // https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple

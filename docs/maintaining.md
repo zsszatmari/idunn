@@ -14,7 +14,7 @@ Rejected alternative: moving the tests into `src/*_tests.rs` files, which cargo-
 
 ## Why CI runs what it runs
 
-CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`.
+CI (`.github/workflows/ci.yml`) calls the same `just` recipes used locally — `just clippy`, `just cargo-deny`, `just check-powerset-full`, `just test-features`, `just test-minimal-versions`, `just coverage-ci`, `just doc`.
 
 The live Apple contract tests (`#[ignore]`d, `cargo test -- --ignored real_apple`) are deliberately excluded from PR CI. They depend on Apple's endpoints being reachable and behaving as documented, which is independent of whatever change is under review — a PR would fail or pass based on Apple's availability that day. `.github/workflows/live-apple.yml` runs them weekly (and on demand via `workflow_dispatch`) to catch drift in Apple's API or in the fakes' assumptions.
 
@@ -33,3 +33,13 @@ Every recipe that iterates feature combinations has to skip the zero- and two-ba
 `clippy` (`justfile`) drops `--all-features` for the same reason, with a simpler fix: idunn's own code doesn't branch on which crypto backend is active — that distinction lives entirely inside `jsonwebtoken` — so linting once under the crate's default backend plus every non-crypto feature (`test-fixtures,tokio-refresh,reqwest`) already covers everything clippy could flag; the crypto features themselves are exercised for real by `check-powerset-full`/`test-features`.
 
 `just check-powerset-full` runs the full feature powerset on every PR; `just check-powerset` covers only depth 2. That is 25 check combinations across the crate's 4 declared features (`aws_lc_rs`, `rust_crypto`, `test-fixtures`, `tokio-refresh`) — cheap enough that sampling a subset buys nothing. Revisit if the feature count grows past roughly 7, where the powerset's combinatorial growth would start to cost real CI time.
+
+## Why docs.rs builds with `reqwest` and `tokio-refresh`
+
+docs.rs builds default features only, which would hide `ReqwestTransport`, `AppleAuthClient::new` and `AppleSeed::with_background_refresh`. `[package.metadata.docs.rs]` in `Cargo.toml` enables `reqwest` and `tokio-refresh`, and the `docs` CI job builds the same way through `just doc`, failing on any rustdoc warning.
+
+- `all-features` is impossible: `aws_lc_rs` and `rust_crypto` are mutually exclusive (the `compile_error!` in `src/lib.rs`). The default `aws_lc_rs` is used, and the public API is the same for both backends.
+- `test-fixtures` stays off: it exists for downstream dev-dependencies.
+- There are no `rustdoc-args`: docs.rs passes `--cfg docsrs` itself.
+- `#![cfg_attr(docsrs, feature(doc_cfg))]` produces the "Available on crate feature … only" badges. `doc_cfg` is nightly-only; `cfg(docsrs)` is set only by docs.rs and `just doc`, so stable builds never see the feature gate. The older `doc_auto_cfg` no longer exists; its behaviour is part of `doc_cfg`.
+- The feature list appears in both `Cargo.toml` and the `just doc` recipe. Change them together.

@@ -56,3 +56,10 @@ tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(coverage,coverage_nightly)',
 ] }
+
+[package.metadata.docs.rs]
+# docs.rs builds default features only, which would hide the reqwest and tokio-refresh
+# API. all-features is impossible: aws_lc_rs and rust_crypto are mutually exclusive, and
+# the default aws_lc_rs gives the same API. test-fixtures is for dev-dependencies only.
+# Keep in sync with `just doc`.
+features = ["reqwest", "tokio-refresh"]

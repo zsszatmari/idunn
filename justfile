@@ -31,6 +31,11 @@ clippy:
 
 check-all: check-powerset test-features test-minimal-versions
 
+# The docs.rs build: nightly, --cfg docsrs (feature badges), the features from
+# [package.metadata.docs.rs] in Cargo.toml (keep in sync), failing on any warning.
+doc:
+    RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --no-deps --features reqwest,tokio-refresh
+
 # One-time per clone: run the versioned hooks in .githooks/ (rustfmt check before each commit).
 install-hooks:
     git config core.hooksPath .githooks
@@ -55,5 +60,3 @@ cargo-deny:
 cooldown:
     cargo cooldown metadata >/dev/null
 
-
-# TODO: look into cargo-mutants
