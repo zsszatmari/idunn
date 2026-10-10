@@ -55,18 +55,20 @@ The two files live in `src/docs/` because rustdoc is their primary reader, the s
 - `src/docs/architecture.md` has no top-level heading: rustdoc takes the module's summary line from the first block, so the intro paragraph comes first.
 - `just doc-links` excludes rustdoc's own source-view links (`.rs.html#12-14`): JavaScript creates those line anchors, so a static check cannot find them.
 
-## Why the package uses an include list
+## Why one cargo-mutants mutant is excluded
 
-`include` in `Cargo.toml` ships `src/`, the README and both licence files. Cargo's default would also ship every other tracked file (`docs/`, CI configuration, `justfile`, `deny.toml`), and untracked files such as local notes when they are not git-ignored. An allow-list keeps the published crate to what a user needs. `src/` covers `src/docs/*.md`, which `include_str!` needs at compile time.
+The mutation run gates CI, so every mutant must be killed or justified. One class cannot be killed: `JwksStore` compares `Instant::elapsed()` from the real monotonic clock against a configured `Duration` in two places, the `refresh_interval` check in `get_key` (a fresh snapshot is confident evidence that a kid does not exist) and the `cooldown_period` check in `try_refresh`. Replacing `<` with `<=` changes the result only when the elapsed time equals the bound to the nanosecond. No test can produce that without a fake clock, and either answer at that instant is correct, so the mutant is equivalent.
 
-Tests are not shipped. The dev-dependency on the crate itself (which switches on `reqwest` and `tokio-refresh` for `cargo test`) is stripped from the published manifest, so the tests would not build from the package.
+Both strict `<` comparisons go through the private `is_within` helper in `src/jwks_store.rs`, and `.cargo/mutants.toml` excludes only `replace < with <= in is_within`. The exclusion names one concept. A `<` added to `get_key` or `try_refresh` later is still mutated.
 
-The `package` CI job runs `cargo package --locked`, which builds the packaged crate in isolation. A file missing from `include` fails there, long before a release.
+The `>=` comparisons (`past_grace_period`, `snapshot_past_max_age`, the `max_key_age` branch of `get_key`) stay inline. Their mutants are killable and each guards a separate fail-closed or grace-period decision, so each call site keeps its own mutants and needs its own test.
 
-## Why the MSRV is 1.88 and how it is checked
+Trade-off: the helper's other mutants (`true`, `false`, `==`, `>`) exist once and are shared by its two call sites. A test at either site kills them, so a missing test at the other site would not be flagged. Accepted for these two sites.
 
-`rust-version` is 1.88, the lowest version `cargo msrv find --features reqwest,tokio-refresh` accepts (measured on aarch64-apple-darwin, confirmed on aarch64-unknown-linux-gnu). `jsonwebtoken` 11 declares 1.88, and the `icu_*` crates behind `url`, plus `time`, declare it too. The `Cargo.lock` versions set the floor and the MSRV follows them; the lockfile is not downgraded to lower it.
+Rejected alternatives:
 
-The `msrv` CI job installs exactly 1.88.0 and runs `cargo check --locked` with `reqwest` and `tokio-refresh` on. It checks the library only (no `--all-targets`), because the dev-dependencies and test code may use newer features than the library promises. The version appears in `Cargo.toml` and in the job; change them together.
-
-Raising the MSRV bumps the minor version, as the README states. After a dependency update, a failing `msrv` job means the update raised the floor: either pin the dependency to a version that supports 1.88 or raise `rust-version` in both places.
+- Excluding by function name (`in JwksStore<T>::get_key` / `try_refresh`): silently excludes any later `<` in those functions.
+- One helper for all five elapsed-time comparisons: its mutants would exist once, so one site's test would kill them for all, and a missing test for the `max_key_age` branch would go unnoticed.
+- Injecting a fake clock: a large refactor only to pin behavior at a meaningless nanosecond boundary.
+- Rewriting with `checked_sub` to avoid the operator: hides the mutant from the tool instead of justifying it.
+- `#[mutants::skip]` on the functions: hides every other mutant in the core logic.

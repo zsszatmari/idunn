@@ -213,9 +213,53 @@ pub(crate) mod test_fixtures {
 #[cfg(all(test, feature = "reqwest"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    /// Accepts one connection, reads the full request (head and body), writes
+    /// `response` verbatim and ends the task, dropping the socket. The task
+    /// returns the raw request text so tests can assert on what was sent.
+    async fn serve_once(
+        response: &'static str,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut request = String::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                let read = reader.read_line(&mut line).await.unwrap();
+                request.push_str(&line);
+                assert_ne!(read, 0, "client closed before the end of the request head");
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+
+            // The reader may already hold buffered body bytes, so the body
+            // must be read through it rather than from the raw stream.
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).await.unwrap();
+            request.push_str(&String::from_utf8(body).unwrap());
+
+            let stream = reader.get_mut();
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+            request
+        });
+
+        (address, handle)
+    }
 
     #[tokio::test]
     #[cfg(feature = "reqwest")]
@@ -235,27 +279,10 @@ mod tests {
     async fn send_returns_network_error_when_response_fails() {
         use reqwest::RequestBuilder;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-
-        let spawned_handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut line = String::new();
-            let mut reader = tokio::io::BufReader::new(&mut stream);
-            loop {
-                line.clear();
-                reader.read_line(&mut line).await.unwrap();
-                if line == "\r\n" || line.trim().is_empty() {
-                    break;
-                }
-            }
-
-            stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 14\r\n\r\nmalformed gzip"
-            ).await.unwrap();
-            stream.flush().await.unwrap();
-            // don't wait for the client, deliberately end task, socket is dropped
-        });
+        let (address, spawned_handle) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 14\r\n\r\nmalformed gzip",
+        )
+        .await;
 
         let client = reqwest::Client::builder().gzip(true).build().unwrap();
         let transport = ReqwestTransport::with_client(client);
@@ -265,5 +292,64 @@ mod tests {
         assert!(matches!(err, TransportError::Network(_)));
 
         std::mem::drop(spawned_handle);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "reqwest")]
+    async fn post_form_sends_body_and_headers_and_returns_body_on_success() {
+        let (address, handle) =
+            serve_once("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+                .await;
+
+        let result = ReqwestTransport::default()
+            .post_form(
+                &format!("http://{address}/token"),
+                &[("Content-Type", "application/x-www-form-urlencoded")],
+                "a=1&b=2",
+                Duration::from_secs(5),
+            )
+            .await;
+
+        // Asserted before awaiting the handle: a transport that never sends
+        // would leave the server blocked in accept() and hang instead of fail.
+        assert_eq!(result.unwrap(), "hello");
+
+        let request = handle.await.unwrap();
+        assert!(request.starts_with("POST /token "), "{request}");
+        // hyper lowercases header names on the wire.
+        assert!(
+            request
+                .to_lowercase()
+                .contains("content-type: application/x-www-form-urlencoded"),
+            "{request}"
+        );
+        assert!(request.ends_with("a=1&b=2"), "{request}");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "reqwest")]
+    async fn send_returns_http_error_with_status_and_body_on_non_success() {
+        let (address, _handle) = serve_once(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 25\r\nConnection: close\r\n\r\n{\"error\":\"invalid_grant\"}",
+        )
+        .await;
+
+        let err = ReqwestTransport::default()
+            .post_form(
+                &format!("http://{address}/token"),
+                &[],
+                "a=1",
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+
+        match err {
+            TransportError::Http { status, body } => {
+                assert_eq!(status, 400);
+                assert_eq!(body, r#"{"error":"invalid_grant"}"#);
+            }
+            other => panic!("expected Http error, got {other:?}"),
+        }
     }
 }

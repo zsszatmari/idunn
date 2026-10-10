@@ -13,6 +13,12 @@ use crate::transport::{HttpGet, TransportError};
 const JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// True while less than `window` has passed since `since`.
+// Its `<` -> `<=` mutant is excluded in .cargo/mutants.toml; see docs/maintaining.md.
+fn is_within(since: Instant, window: Duration) -> bool {
+    since.elapsed() < window
+}
+
 struct CachedKeys {
     keys: HashMap<String, DecodingKey>,
     fetched_at: Instant,
@@ -100,7 +106,7 @@ impl<T: HttpGet> JwksStore<T> {
                 // truly not there; an older (or never-completed) one leaves us
                 // unsure. The bound is `refresh_interval`; the grace period
                 // only governs when a cached kid stops short-circuiting.
-                if cached.fetched_at.elapsed() < self.config.refresh_interval {
+                if is_within(cached.fetched_at, self.config.refresh_interval) {
                     Err(VerificationError::InvalidToken(
                         InvalidTokenCause::InvalidKeyId {
                             kid: Some(kid.to_string()),
@@ -184,7 +190,7 @@ impl<T: HttpGet> JwksStore<T> {
     async fn try_refresh(&self) -> bool {
         let mut last_attempt = self.network_request_mutex.lock().await;
         if let Some(attempted_at) = *last_attempt
-            && attempted_at.elapsed() < self.config.cooldown_period
+            && is_within(attempted_at, self.config.cooldown_period)
         {
             return false;
         }

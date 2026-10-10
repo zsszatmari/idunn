@@ -1,0 +1,4 @@
+# `is_within` compares Instant::elapsed() on the real clock against a Duration;
+# `<` vs `<=` differ only at an exact-nanosecond boundary no test can hit, and
+# the outcome there is irrelevant. See docs/maintaining.md.
+exclude_re = ["replace < with <= in is_within"]
