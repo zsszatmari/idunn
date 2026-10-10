@@ -42,10 +42,13 @@ doc:
     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --no-deps --features reqwest,tokio-refresh
 
 # Checks the generated docs for broken links, including heading anchors, which rustdoc
-# does not validate. Source-view links (`.rs.html#12-14`) are excluded: JavaScript
-# creates their line anchors, so a static check cannot find them.
+# does not validate. Each exclusion covers one known cause (docs/maintaining.md):
+# - Source-view links (`.rs.html#12-14`): JavaScript creates their line anchors, so a
+#   static check cannot find them.
+# - `dispatcher#setting-the-default-subscriber`: a link in tracing's docs that rustdoc
+#   leaves unresolved on every type page.
 doc-links: doc
-    lychee --offline --include-fragments --no-progress --exclude '\.rs\.html#' target/doc/idunn
+    lychee --offline --include-fragments --no-progress --exclude '\.rs\.html#' --exclude '/dispatcher#setting-the-default-subscriber$' target/doc/idunn
 
 # One-time per clone: run the versioned hooks in .githooks/ (rustfmt check before each commit).
 install-hooks:

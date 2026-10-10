@@ -54,6 +54,7 @@ The two files live in `src/docs/` because rustdoc is their primary reader, the s
 - Heading anchors (`#why-…`) derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` for the old title and update the links.
 - `src/docs/architecture.md` has no top-level heading: rustdoc takes the module's summary line from the first block, so the intro paragraph comes first.
 - `just doc-links` excludes rustdoc's own source-view links (`.rs.html#12-14`): JavaScript creates those line anchors, so a static check cannot find them.
+- `just doc-links` also excludes one link, `dispatcher#setting-the-default-subscriber`. Every type page lists tracing's blanket impls (`WithSubscriber`, `Instrument`) with their docs, and rustdoc leaves the intra-doc links in those docs unresolved. The text is tracing's and the rendering is rustdoc's, so idunn cannot fix it. lychee skips the other unresolved links there (`super::Subscriber`, `crate::Span`) because they are not file URLs. Any other broken link, including a new one from a dependency, still fails the check. Remove the exclusion once rustdoc resolves these links. Rejected: excluding every href whose last path segment has no file extension, which would also hide later breakage of the same kind.
 
 ## Why one cargo-mutants mutant is excluded
 
