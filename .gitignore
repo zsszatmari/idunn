@@ -5,3 +5,4 @@ lcov.info
 .claude/settings.local.json
 sbxenv.yaml
 mutants.out
+mutants.out.old

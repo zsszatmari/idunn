@@ -29,6 +29,11 @@ test-features:
 clippy:
     cargo clippy --workspace --all-targets --features test-fixtures,tokio-refresh,reqwest -- -D warnings
 
+# Mutation testing; fails on any MISSED or TIMEOUT mutant (the invocation CI runs).
+# Must run from the crate root: that is where .cargo/mutants.toml (the exclusions) is read.
+mutants:
+    cargo mutants
+
 check-all: check-powerset test-features test-minimal-versions
 
 # The docs.rs build: nightly, --cfg docsrs (feature badges), the features from
