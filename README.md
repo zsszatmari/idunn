@@ -1,5 +1,9 @@
 # idunn
 
+[![crates.io](https://img.shields.io/crates/v/idunn.svg)](https://crates.io/crates/idunn)
+[![Documentation](https://docs.rs/idunn/badge.svg)](https://docs.rs/idunn)
+[![CI](https://github.com/zsszatmari/idunn/actions/workflows/ci.yml/badge.svg)](https://github.com/zsszatmari/idunn/actions/workflows/ci.yml)
+
 `idunn` is a Rust crate for Sign in with Apple: it verifies identity tokens, exchanges authorization codes for refresh tokens, and revokes them, all against Apple's own REST API. It has no persistence layer and no opinion about your database, your web framework, or your async runtime — it hands you typed, verified results and gets out of the way.
 
 ## Example
@@ -90,6 +94,7 @@ What `lookup` and `schedule_revocation` must guarantee, and how to run the revoc
 - **Verified by default.** `sign_up_or_log_in` never hands back an Apple `id_token` it hasn't checked itself — signature, issuer, audience, expiry, nonce presence — so there's no raw JWT for a caller to accidentally trust unchecked.
 - **Secrets that can't leak by accident.** Refresh tokens and private keys get hand-written, redacting `Debug` impls and zeroize-on-drop, so an `unwrap()` panic or a stray `{:?}` in a log line can't print a live credential.
 - **An injectable HTTP transport**, so you can bring your own HTTP client. reqwest is supported out of the box.
+- **Mutation-tested.** CI fails when cargo-mutants finds a code change that no test catches, or when line coverage drops below 90%.
 
 What it deliberately does not do: store anything, decide who "owns" an Apple account, or coordinate concurrent sign-ins and revocations for the same user — that needs a shared view of your own application state, so it's your job, but it's guided by the `AppleAccounts` trait you implement. The crate-level documentation on docs.rs describes that contract, and the `idunn::_architecture` module there explains the reasoning behind the crate's design.
 
@@ -106,7 +111,7 @@ idunn = { version = "0.1", features = ["reqwest", "tokio-refresh"] }
 
 The minimum supported Rust version is 1.88.
 
-The full API — constructors, `sign_up_or_log_in`, `verify_identity_token`, `exchange_authorization_code`, `revoke_refresh_token` — is documented in the crate's rustdoc. Build it locally with `cargo doc --open`, or read it on docs.rs once published.
+The full API — constructors, `sign_up_or_log_in`, `verify_identity_token`, `exchange_authorization_code`, `revoke_refresh_token` — is documented on [docs.rs](https://docs.rs/idunn); `cargo doc --open` builds the same documentation locally.
 
 ## Contributing
 
