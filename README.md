@@ -6,6 +6,8 @@
 
 `idunn` is a Rust crate for Sign in with Apple: it verifies identity tokens, exchanges authorization codes for refresh tokens, and revokes them, all against Apple's own REST API. It has no persistence layer and no opinion about your database, your web framework, or your async runtime — it hands you typed, verified results and gets out of the way.
 
+idunn's guiding principle is to be easy to use correctly and hard to use incorrectly: the obvious way to integrate it is the one Apple's rules require.
+
 ## Example
 
 ```rust
@@ -112,6 +114,35 @@ idunn = { version = "0.1", features = ["reqwest", "tokio-refresh"] }
 The minimum supported Rust version is 1.88.
 
 The full API — constructors, `sign_up_or_log_in`, `verify_identity_token`, `exchange_authorization_code`, `revoke_refresh_token` — is documented on [docs.rs](https://docs.rs/idunn); `cargo doc --open` builds the same documentation locally.
+
+## Comparison with other Sign in with Apple crates
+
+idunn is built around one call, `sign_up_or_log_in`, that runs a sign-in the way Apple's rules require: it verifies the identity token, checks the nonce, exchanges the authorization code and checks that the exchanged token names the same user and nonce. You implement two storage hooks, and idunn tells you which refresh token to store, which to revoke and which to drop. The rules live in idunn and in the `AppleAccounts` contract it documents, so you don't have to work them out from Apple's documentation.
+
+As of October 2026, comparing the latest release of each crate:
+
+| | idunn | [id_token_parser](https://crates.io/crates/id_token_parser) | [siwa-async](https://crates.io/crates/siwa-async) | [apple-signin](https://crates.io/crates/apple-signin) | [apple](https://crates.io/crates/apple) | [sign-in-with-apple](https://crates.io/crates/sign-in-with-apple) |
+|---|---|---|---|---|---|---|
+| Runs the whole sign-in in one call, including what to store and revoke | ✔️ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Verifies identity tokens (signature, issuer, audience, expiry) | ✔️ | ✔️ | ✔️ | ✔️ | ❌ | Partial |
+| Checks the nonce | ✔️ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Caches Apple's signing keys, refetching on rotation | ✔️ | ✔️ | ❌ | ✔️ | ❌ | ❌ |
+| Rate-limits key fetches and backs off after failures | ✔️ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Exchanges authorization codes | ✔️ | ✔️ | ✔️ | ❌ | ✔️ | ❌ |
+| Verifies the exchanged token and checks it names the same user and nonce | ✔️ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Validates refresh tokens | Not needed¹ | ❌ | ✔️ | ❌ | ✔️ | ❌ |
+| Revokes tokens | ✔️ | ✔️ | ✔️ | ❌ | ❌ | ❌ |
+| Verifies server-to-server notifications² | ❌ | Partial | ❌ | ❌ | ❌ | Partial |
+| Accepts your own HTTP client | ✔️ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Checked release | 0.1.0 | 0.2.5 (2025-12) | 0.5.2 (2022-06) | 0.2.0 (2025-11) | 0.2.0 (2026-02) | 0.2.0 (2022-02) |
+
+¹ idunn exchanges the authorization code at every sign-in, so the stored refresh token follows the user's latest authorization. idunn uses it only to revoke that authorization when the account is deleted.
+
+² A useful future addition, but strictly [required](https://developer.apple.com/news/?id=j9zukcr6) only for developers based in South Korea using a Services ID. Pull requests are welcome; please open an issue first to discuss the design.
+
+`sign-in-with-apple` is based on [`siwa`](https://crates.io/crates/siwa) (0.1.2, 2021-03). [`apple_auth`](https://crates.io/crates/apple_auth) and [`oauth2-apple`](https://crates.io/crates/oauth2-apple) cover only the authorization code exchange.
+
+If you feel an entry is wrong or out of date, please open an issue.
 
 ## Contributing
 
