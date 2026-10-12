@@ -119,6 +119,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fetch --locked
       - run: just coverage-ci
+      # Codecov being down must not fail CI; a failed upload still shows as a
+      # failed step. See docs/maintaining.md, "Why coverage is uploaded to Codecov".
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        if: ${{ !cancelled() && hashFiles('lcov.info') != '' }}
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          disable_search: true
+          fail_ci_if_error: true
+          # The Codecov CLI the action downloads. Dependabot does not bump it.
+          version: v11.3.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:

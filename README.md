@@ -3,6 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/idunn.svg)](https://crates.io/crates/idunn)
 [![Documentation](https://docs.rs/idunn/badge.svg)](https://docs.rs/idunn)
 [![CI](https://github.com/zsszatmari/idunn/actions/workflows/ci.yml/badge.svg)](https://github.com/zsszatmari/idunn/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/zsszatmari/idunn/branch/main/graph/badge.svg)](https://codecov.io/gh/zsszatmari/idunn)
 
 `idunn` is a Rust crate for Sign in with Apple: it verifies identity tokens, exchanges authorization codes for refresh tokens, and revokes them, all against Apple's own REST API. It has no persistence layer and no opinion about your database, your web framework, or your async runtime — it hands you typed, verified results and gets out of the way.
 
