@@ -230,6 +230,8 @@ struct Credentials {
 pub struct AppleAuthClient<T: HttpTransport, N: NonceRequirement = Strict> {
     identity_verification: Arc<identity_verification::IdentityVerificationClient<T>>,
     credentials: Arc<Credentials>,
+    // No `Arc`: `ReqwestTransport` is already a cheap handle, its
+    // `reqwest::Client` being `Arc`-backed.
     transport: T,
     // `fn() -> N` keeps this field `Send + Sync + Clone + Copy`
     // unconditionally, so `#[derive(Clone)]` above never demands `N: Clone` — `N`
@@ -317,6 +319,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         S: Fn(Duration) -> Fut + Send + 'static,
         Fut: Future + Send,
     {
+        // A strong reference would keep the cache alive, and keep polling
+        // Apple, after the last client clone is dropped.
         let weak: Weak<identity_verification::IdentityVerificationClient<T>> =
             Arc::downgrade(&self.identity_verification);
         async move {
@@ -651,6 +655,8 @@ async fn reject_after_exchange<A: AppleAccounts>(
 /// different `N`, would make an unannotated call ambiguous. A `Permissive`
 /// client is built with `with_nonce_requirement` instead.
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
+    // `transport` comes last: it is the argument callers most often leave at
+    // `ReqwestTransport::default()`.
     pub fn with_transport(
         token_config: AppleTokenConfig,
         config: VerificationConfig,
