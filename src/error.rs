@@ -9,7 +9,7 @@ use thiserror::Error;
 /// token exchange that fails verification instead.
 #[derive(Debug, Clone, Error)]
 pub enum VerificationError {
-    /// The token is confirmed invalid — see `cause` for specifics.
+    /// The token is confirmed invalid — see [`InvalidTokenCause`] for specifics.
     #[error("invalid Apple identity token: {0}")]
     InvalidToken(InvalidTokenCause),
     /// The token's validity could not be determined (e.g. Apple's key set

@@ -281,9 +281,12 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         Self::build(token_config, config, transport).map(|client| AppleSeed { client })
     }
 
-    /// Returns how long the caller should wait before calling again — see
-    /// `JwksStore::refresh_keystore` for what that duration means and when a
-    /// call is skipped for arriving too early.
+    /// Returns how long the caller should wait before calling again. A call
+    /// arriving while the cached keys are younger than
+    /// [`refresh_interval`](VerificationConfig::refresh_interval) skips the fetch and returns the time
+    /// remaining until then. Otherwise it fetches: a success suggests
+    /// [`refresh_interval`](VerificationConfig::refresh_interval), a failed or cooldown-skipped attempt
+    /// suggests [`cooldown_period`](VerificationConfig::cooldown_period).
     ///
     /// Most callers don't need to drive this by hand:
     /// [`AppleSeed::with_refresh_loop`] (or, with the `tokio-refresh` feature,
@@ -358,7 +361,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// returned as-is — it is already your [`A::Error`](AppleAccounts::Error) — and never reported as
     /// a false mismatch. After the exchange, this method compares the
     /// exchanged `id_token`'s nonce against the identity token's
-    /// already-accepted nonce with `nonce_eq` — see
+    /// already-accepted nonce, ASCII-case-insensitively and in constant time — see
     /// [Checks after the exchange](crate::_architecture#checks-after-the-exchange).
     ///
     /// [`accounts.lookup`](AppleAccounts::lookup) runs after the identity token and its nonce are
@@ -705,7 +708,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// a cold cache right away, so the first verification never pays the
     /// fetch latency itself. The loop never sleeps for less than one second,
     /// even if the configured [`VerificationConfig`] would otherwise suggest
-    /// less — see `MIN_REFRESH_DELAY`.
+    /// less.
     ///
     /// `idunn` has no runtime dependency of its own: `sleep` is how the
     /// caller supplies its own timer (e.g. [`tokio::time::sleep`], or an
@@ -763,7 +766,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
 /// for why this takes a [`Handle`](tokio::runtime::Handle) as an explicit parameter, and why it sits
 /// behind the optional `tokio-refresh` feature. ([`N: NonceRequirement`](NonceRequirement)
 /// already implies `N: 'static`, which [`handle.spawn`](tokio::runtime::Handle::spawn)
-/// needs — see [`NonceRequirement`]'s doc in `config.rs`.)
+/// needs — see [`NonceRequirement`].)
 #[cfg(feature = "tokio-refresh")]
 impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// Spawns a background task that keeps the JWKS cache warm for as long as
@@ -797,8 +800,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
 /// [Nonce policy as a type parameter](crate::_architecture#nonce-policy-as-a-type-parameter).
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     /// [`sign_up_or_log_in_with_nonce_checker`](AppleAuthClient::sign_up_or_log_in_with_nonce_checker) with a checker that compares the
-    /// claim directly against `expected_nonce` — constant-time and ASCII-case-insensitive,
-    /// see `nonce_eq`. A missing nonce (`None`) is a rejection, though under
+    /// claim directly against `expected_nonce` — constant-time and ASCII-case-insensitive.
+    /// A missing nonce (`None`) is a rejection, though under
     /// [`Strict`] that's moot: [`verify_identity_token`](AppleAuthClient::verify_identity_token) already rejects a missing
     /// nonce as [`IdentityTokenRejected`](SignInError::IdentityTokenRejected) before the checker runs.
     ///

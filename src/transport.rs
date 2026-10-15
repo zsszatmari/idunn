@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// Error from the HTTP transport used to reach Apple's endpoints — a network
 /// failure, or a non-2xx HTTP response (status code + raw body). Deliberately
-/// narrower than `IdunnError`: this is also what external [`HttpTransport`]
+/// narrower than idunn's other error types: this is also what external [`HttpTransport`]
 /// implementors construct, and they shouldn't need to know about idunn's
 /// Apple-specific error variants. [`Network`](TransportError::Network) holds a boxed error
 /// so a non-reqwest [`HttpTransport`] implementation can report its own
@@ -18,7 +18,7 @@ pub enum TransportError {
 }
 
 /// Abstraction over GET requests needed to talk to Apple's endpoints (currently just
-/// JWKS fetching). Split out from `HttpPostForm` so read-only call sites can bound on
+/// JWKS fetching). Split out from [`HttpPost`] so read-only call sites can bound on
 /// this alone and need no [`post_form`](HttpPost::post_form) implementation.
 pub trait HttpGet: Clone + Send + Sync + 'static {
     /// GETs a resource, returning the response body on success (2xx) or a
@@ -54,7 +54,7 @@ pub trait HttpPost: Clone + Send + Sync + 'static {
 /// Combined GET + POST-form capability. Exists so the transport is swappable (idunn
 /// consumers may prefer a differently configured or non-reqwest client) and so tests
 /// can substitute an in-memory fake for the network. Implemented
-/// automatically for any type that has both [`HttpGet`] and `HttpPostForm` — implement
+/// automatically for any type that has both [`HttpGet`] and [`HttpPost`] — implement
 /// those two traits.
 pub trait HttpTransport: HttpGet + HttpPost {}
 impl<T: HttpGet + HttpPost> HttpTransport for T {}

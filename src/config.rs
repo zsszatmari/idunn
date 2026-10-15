@@ -43,7 +43,7 @@ mod sealed {
 /// marker types with no lifetime parameter of their own, so this adds no real
 /// restriction, but it means every [`N: NonceRequirement`](NonceRequirement) bound elsewhere in
 /// the crate gets `N: 'static` for free — most usefully for
-/// [`AppleSeed::with_background_refresh`](crate::AppleSeed::with_background_refresh) (`src/lib.rs`, behind the
+/// [`AppleSeed::with_background_refresh`](crate::AppleSeed::with_background_refresh) (behind the
 /// `tokio-refresh` feature), which spawns a future generic over `N` and so
 /// needs it to be `'static` for [`tokio::spawn`]/[`Handle::spawn`](tokio::runtime::Handle::spawn).
 pub trait NonceRequirement: sealed::Sealed + 'static {
@@ -91,25 +91,25 @@ impl NonceRequirement for Permissive {
 /// [Nonce policy as a type parameter](crate::_architecture#nonce-policy-as-a-type-parameter).
 #[derive(Clone, Copy, Debug)]
 pub struct VerificationConfig {
-    /// How long a successful fetch stays "fresh" before `get_key`'s lazy path
+    /// How long a successful fetch stays "fresh" before token verification
     /// tries again, even if every requested kid is still present — protects
     /// against holding a key Apple has since revoked. Not a hard expiry: a
     /// key already cached is still honored past this interval, right up
     /// until a fetch attempt actually replaces the snapshot.
     pub refresh_interval: Duration,
-    /// Floor on how often `JwksStore` will actually contact Apple's key
+    /// Floor on how often idunn will actually contact Apple's key
     /// endpoint, regardless of why a refresh was requested: backing off
     /// after a failed attempt, an explicit [`refresh_keystore()`](crate::AppleAuthClient::refresh_keystore) call arriving
-    /// sooner than expected, or a flood of `get_key` lookups for unknown
+    /// sooner than expected, or a flood of tokens naming unknown
     /// kids. Not tied specifically to failure — it rate-limits every attempt.
-    /// Important protectionagainst DoS attacks.
+    /// Important protection against DoS attacks.
     pub cooldown_period: Duration,
-    /// Extra window past [`refresh_interval`](VerificationConfig::refresh_interval) during which `get_key` keeps
-    /// serving a kid it already holds *without* first attempting a refresh.
+    /// Extra window past [`refresh_interval`](VerificationConfig::refresh_interval) during which token
+    /// verification keeps using a kid it already holds *without* first attempting a refresh.
     /// [`refresh_interval`](VerificationConfig::refresh_interval) only makes the lazy refresh eligible; this is how
     /// long past that point a cached-kid lookup still short-circuits instead
-    /// of blocking on `try_refresh` (which holds `network_request_mutex` for
-    /// the whole fetch, up to `REQUEST_TIMEOUT`). So a brief refresh outage —
+    /// of waiting for a key fetch (which can take up to its fixed 10-second
+    /// timeout). So a brief refresh outage —
     /// Apple's endpoint down, or cooldown backoff after a failure — can't add
     /// fetch latency to logins whose key is already cached. Set to
     /// [`Duration::ZERO`] to refresh eagerly. Lookups for a kid
@@ -119,15 +119,16 @@ pub struct VerificationConfig {
     /// trusted at all. Unlike [`refresh_interval`](VerificationConfig::refresh_interval) and [`stale_key_grace_period`](VerificationConfig::stale_key_grace_period)
     /// — which only tune how *eagerly* a refresh is attempted and never stop
     /// a key we already hold from being honored — this one fails closed: once
-    /// the last successful fetch is older than [`max_key_age`](VerificationConfig::max_key_age), `get_key`
-    /// refuses every kid (even one still present in the snapshot) with
+    /// the last successful fetch is older than [`max_key_age`](VerificationConfig::max_key_age), token
+    /// verification refuses every kid (even one still present in the snapshot) with
     /// [`CannotVerifyToken`](crate::VerificationError::CannotVerifyToken) and logs at `error` level.
     ///
     /// This caps the blast radius of a prolonged refresh outage (Apple's
     /// endpoint unreachable for days, or the host's egress broken): without
     /// it, a snapshot fetched long ago would keep validating tokens forever,
     /// including tokens signed with a key Apple has since revoked. Should be
-    /// set comfortably larger than `refresh_interval + stale_key_grace_period`
+    /// set comfortably larger than the sum of [`refresh_interval`](VerificationConfig::refresh_interval)
+    /// and [`stale_key_grace_period`](VerificationConfig::stale_key_grace_period)
     /// so it only ever bites when refresh has genuinely been failing for a
     /// long time.
     pub max_key_age: Duration,
