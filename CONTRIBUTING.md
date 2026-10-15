@@ -63,7 +63,8 @@ cargo test -- --ignored real_apple  # live Apple contract tests (network)
 Guidelines for the change itself:
 
 - Keep the public API documented. Public items carry doc comments explaining
-  what a caller is guaranteed.
+  what a caller is guaranteed. Every mention of a public item in the docs is an
+  intra-doc link, so docs.rs navigates to it and rustdoc checks it.
 - New behaviour needs tests. Security-relevant behaviour (signature checks,
   claim validation, redaction of secrets) needs tests for the *rejection* path
   as well as the happy path.
