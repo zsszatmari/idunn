@@ -9,5 +9,6 @@ lockfile-baseline = "ignore"
 global-min-publish-age = "14 days"
 
 [[allow.package]]
+# rustls is widely reviewed, and its security fixes should reach Cargo.lock as soon as possible
 crate = "rustls"
-min-publish-age = "1 day"
+min-publish-age = "4 hours"
