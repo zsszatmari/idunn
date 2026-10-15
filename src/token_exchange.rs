@@ -21,8 +21,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Zeroizes every field on drop (`ZeroizeOnDrop`), including every `Clone` of it, so
 /// the `.p8` key is not left readable in freed memory — the `EncodingKey` idunn
 /// derives from it already does the same. Its `Debug` impl is hand-written to
-/// redact `private_key_pem` (a derived one would dump the raw key bytes into any
-/// log line or panic message). See the note on `private_key_pem` for what the
+/// redact [`private_key_pem`](AppleTokenConfig::private_key_pem) (a derived one would dump the raw key bytes into any
+/// log line or panic message). See the note on [`private_key_pem`](AppleTokenConfig::private_key_pem) for what the
 /// zeroize guarantee does and does not cover.
 #[derive(Clone, zeroize::ZeroizeOnDrop)]
 pub struct AppleTokenConfig {
@@ -35,7 +35,7 @@ pub struct AppleTokenConfig {
     pub key_id: String,
     /// Apple: "The identifier (App ID or Services ID) for your app. To help prevent the possibility of exposing sensitive
     /// data to the end user, the identifier must not include your Team ID."
-    /// Also the expected `aud` claim on identity tokens passed to `verify_identity_token` —
+    /// Also the expected `aud` claim on identity tokens passed to [`verify_identity_token`](crate::AppleAuthClient::verify_identity_token) —
     /// Apple's docs specify the identity token's audience is always the developer's client_id,
     /// so this one field drives both token exchange and identity verification.
     pub client_id: String,
@@ -53,7 +53,7 @@ pub struct AppleTokenConfig {
 
 impl std::fmt::Debug for AppleTokenConfig {
     /// Hand-written: the identifier fields are non-secret (see
-    /// their docs) and printed in full, but `private_key_pem` is shown only as
+    /// their docs) and printed in full, but [`private_key_pem`](AppleTokenConfig::private_key_pem) is shown only as
     /// a byte count so the key never reaches a log or panic message. Keeping
     /// this explicit also means a later `#[derive(Debug)]` can't silently
     /// reintroduce the leak.
@@ -74,17 +74,17 @@ impl std::fmt::Debug for AppleTokenConfig {
 ///
 /// A newtype around `String` so no derived `Debug` can print live credential
 /// material wherever the value ends up — both
-/// `SignInDetails::refresh_token` (a success value that might still be
-/// logged) and `CodeExchangeError::ExchangedTokenUnverified` (an error, which gets
+/// [`SignInDetails::refresh_token`](crate::SignInDetails::refresh_token) (a success value that might still be
+/// logged) and [`CodeExchangeError::ExchangedTokenUnverified`](crate::CodeExchangeError::ExchangedTokenUnverified) (an error, which gets
 /// `{:?}`-printed into logs, `anyhow` chains and `unwrap()` panic messages by
 /// convention). Deliberately has no `Display` impl either, for the same
-/// reason. Reach for the value explicitly through `as_str`/`into_inner`.
+/// reason. Reach for the value explicitly through [`as_str`](RefreshToken::as_str)/[`into_inner`](RefreshToken::into_inner).
 #[derive(Clone)]
 pub struct RefreshToken(String);
 
 impl RefreshToken {
-    /// Wraps a token the host stored earlier, so `AppleAccounts::lookup` can
-    /// report it in `AccountState::AlreadyOnFile`. Tokens Apple issues arrive
+    /// Wraps a token the host stored earlier, so [`AppleAccounts::lookup`](crate::AppleAccounts::lookup) can
+    /// report it in [`AccountState::AlreadyOnFile`](crate::AccountState::AlreadyOnFile). Tokens Apple issues arrive
     /// already wrapped.
     pub fn new(token: String) -> Self {
         Self(token)
@@ -245,7 +245,7 @@ csOfc9dl5tGk8LndzgU4CVvEqLihRANCAAQNSRZdtAsSZG8pTuLiK7JdLUog/M7I\n\
 zqbgw/e2HmOOuotg2tZP7JoBgnu7rNEplIygqTjYf8pKesYPyHrOj5ae\n\
 -----END PRIVATE KEY-----\n";
 
-    /// EC public half matching `TEST_PRIVATE_KEY_PEM`, for tests that need to verify
+    /// EC public half matching [`TEST_PRIVATE_KEY_PEM`], for tests that need to verify
     /// a client secret idunn signed.
     pub const TEST_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDUkWXbQLEmRvKU7i4iuyXS1KIPzO\n\

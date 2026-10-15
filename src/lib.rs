@@ -45,7 +45,7 @@ pub use transport::{HttpGet, HttpPost, HttpTransport, TransportError};
 #[cfg(feature = "reqwest")]
 pub use transport::ReqwestTransport;
 
-/// Test-only fixtures: a throwaway EC P-256 key and a matching `AppleTokenConfig`.
+/// Test-only fixtures: a throwaway EC P-256 key and a matching [`AppleTokenConfig`].
 /// Never enable this feature for a production build — the "private key" here is
 /// committed to this repository and grants nothing.
 #[cfg(feature = "test-fixtures")]
@@ -93,13 +93,13 @@ fn nonce_eq(candidate: Option<&str>, expected: &str) -> bool {
     candidate.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
-/// What `AppleAuthClient::exchange_authorization_code` carries back: the
+/// What [`AppleAuthClient::exchange_authorization_code`] carries back: the
 /// refresh token from the exchange plus the identity from the `id_token` Apple
 /// returned alongside it, whose signature, `iss`, `aud` and `exp` idunn
 /// verified against Apple's published keys and whose nonce *presence* it
-/// enforced per the configured `NoncePolicy`.
+/// enforced per the configured [`NoncePolicy`].
 ///
-/// Only constructible through `AppleAuthClient::exchange_authorization_code`.
+/// Only constructible through [`AppleAuthClient::exchange_authorization_code`].
 #[derive(Debug, Clone)]
 pub struct SignInDetails {
     /// The `id_token`'s `nonce` claim, verbatim — **not** compared against
@@ -123,7 +123,7 @@ pub struct SignInDetails {
 #[derive(Debug, Clone)]
 pub enum AccountState {
     /// A refresh token is stored for this Apple user. This sign-in refreshes
-    /// it, and hands this one back in `SignInOutcome::LoggedIn` if Apple can't
+    /// it, and hands this one back in [`SignInOutcome::LoggedIn`] if Apple can't
     /// issue a new one. It need not be live: a user who revoked the app in
     /// their Apple ID settings is refreshed by the next sign-in.
     AlreadyOnFile { refresh_token: RefreshToken },
@@ -132,13 +132,13 @@ pub enum AccountState {
     NotOnFile,
 }
 
-/// What `sign_up_or_log_in` produced. Either way the host has a refresh token
+/// What [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in) produced. Either way the host has a refresh token
 /// to store; the variants differ in what to do when storing fails.
 #[derive(Debug, Clone)]
 pub enum SignInOutcome {
-    /// A known user. `refresh_token` is the freshly exchanged one, or the
+    /// A known user. [`refresh_token`](SignInOutcome::LoggedIn::refresh_token) is the freshly exchanged one, or the
     /// stored one handed back because Apple couldn't issue a new one
-    /// (`Unavailable` or `Misconfigured`, already logged by idunn). Write it
+    /// ([`Unavailable`](ErrorKind::Unavailable) or [`Misconfigured`](ErrorKind::Misconfigured), already logged by idunn). Write it
     /// next to the user; if writing fails, drop it and never revoke it: a
     /// revocation is authorization-scoped and would end the stored
     /// authorization too, signing the user out of the app at Apple.
@@ -146,7 +146,7 @@ pub enum SignInOutcome {
         identity: AppleIdentity,
         refresh_token: RefreshToken,
     },
-    /// A new authorization. Store `refresh_token`; if storing fails, schedule
+    /// A new authorization. Store [`refresh_token`](SignInOutcome::SignedUp::refresh_token); if storing fails, schedule
     /// it for revocation ([The `AppleAccounts` contract](crate#the-appleaccounts-contract),
     /// obligation 5), or the authorization
     /// outlives the user's chance to delete it.
@@ -158,9 +158,9 @@ pub enum SignInOutcome {
 
 impl SignInOutcome {
     /// The verified identity either way. **Provenance differs by variant:**
-    /// `LoggedIn` carries the identity from the caller's own identity token,
+    /// [`LoggedIn`](SignInOutcome::LoggedIn) carries the identity from the caller's own identity token,
     /// also when the exchange succeeded (the subjects are checked equal);
-    /// `SignedUp` carries the identity from the exchanged `id_token`.
+    /// [`SignedUp`](SignInOutcome::SignedUp) carries the identity from the exchanged `id_token`.
     pub fn identity(&self) -> &AppleIdentity {
         match self {
             SignInOutcome::LoggedIn { identity, .. } => identity,
@@ -169,16 +169,16 @@ impl SignInOutcome {
     }
 }
 
-/// The host's account storage, as `sign_up_or_log_in` sees it: both storage
+/// The host's account storage, as [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in) sees it: both storage
 /// hooks of a sign-in, on one type. The obligations are in
 /// [The `AppleAccounts` contract](crate#the-appleaccounts-contract); the reasoning in
 /// [One `AppleAccounts` trait](crate::_architecture#one-appleaccounts-trait)
 /// and [The host's own error type](crate::_architecture#the-hosts-own-error-type).
 /// Implement it with `async fn`.
 pub trait AppleAccounts: Sync {
-    /// Your own error type, and what `sign_up_or_log_in` returns: `lookup`'s
+    /// Your own error type, and what [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in) returns: [`lookup`](AppleAccounts::lookup)'s
     /// and `nonce_checker`'s errors come back exactly as you returned them, and
-    /// idunn's own failures arrive converted through `From<SignInError>` —
+    /// idunn's own failures arrive converted through [`From<SignInError>`](From) —
     /// where [`SignInError::kind`] says how to answer them. The same shape as
     /// sqlx's `Connection::transaction`.
     type Error: From<SignInError> + std::error::Error + Send + Sync + 'static;
@@ -192,9 +192,9 @@ pub trait AppleAccounts: Sync {
     ) -> impl Future<Output = Result<AccountState, Self::Error>> + Send;
 
     /// Files a live refresh token from a new authorization that idunn rejected
-    /// after the exchange, for revocation no sooner than `pending.grace_period`
-    /// from now (obligation 5). Awaited before `sign_up_or_log_in` fails with
-    /// `SignInError::RejectedAfterExchange` (converted into `Self::Error`); a
+    /// after the exchange, for revocation no sooner than [`pending.grace_period`](PendingRevocation::grace_period)
+    /// from now (obligation 5). Awaited before [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in) fails with
+    /// [`SignInError::RejectedAfterExchange`] (converted into [`Self::Error`]); a
     /// failure to file is the implementation's own to log. Never called for a
     /// known user's refresh: that token is dropped, because revoking it would
     /// end the stored authorization too.
@@ -212,7 +212,7 @@ struct Credentials {
 }
 
 /// Verifies Apple identity tokens and exchanges authorization codes for refresh
-/// tokens, for a single app identified by `AppleTokenConfig::client_id`.
+/// tokens, for a single app identified by [`AppleTokenConfig::client_id`].
 ///
 /// One client with one constructor, covering both identity verification and token
 /// exchange even though they touch mostly-disjoint code. See
@@ -220,9 +220,9 @@ struct Credentials {
 /// for why they're bundled together.
 /// Clonable by design.
 ///
-/// `N: NonceRequirement` (default `Strict`) fixes the `NoncePolicy`
+/// [`N: NonceRequirement`](NonceRequirement) (default [`Strict`]) fixes the [`NoncePolicy`]
 /// identity-token verification enforces, and whether
-/// `sign_up_or_log_in` exists on this client — see
+/// [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in) exists on this client — see
 /// [`NonceRequirement`] and
 /// [Nonce policy as a type parameter](crate::_architecture#nonce-policy-as-a-type-parameter).
 #[derive(Clone)]
@@ -270,8 +270,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     }
 
     /// Constructs a client for an explicit `N`, e.g.
-    /// `AppleAuthClient::<_, Permissive>::with_nonce_requirement(...)`.
-    /// `with_transport`/`new` cover the default `Strict` case without naming
+    /// [`AppleAuthClient::<_, Permissive>::with_nonce_requirement(...)`](AppleAuthClient::with_nonce_requirement).
+    /// [`with_transport`](AppleAuthClient::with_transport)/[`new`](AppleAuthClient::new) cover the default [`Strict`] case without naming
     /// `N` at all.
     pub fn with_nonce_requirement(
         token_config: AppleTokenConfig,
@@ -286,8 +286,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// call is skipped for arriving too early.
     ///
     /// Most callers don't need to drive this by hand:
-    /// `AppleSeed::with_refresh_loop` (or, with the `tokio-refresh` feature,
-    /// `AppleSeed::with_background_refresh`) does it automatically.
+    /// [`AppleSeed::with_refresh_loop`] (or, with the `tokio-refresh` feature,
+    /// [`AppleSeed::with_background_refresh`]) does it automatically.
     pub async fn refresh_keystore(&self) -> std::time::Duration {
         self.identity_verification.refresh_keystore().await
     }
@@ -338,13 +338,13 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         }
     }
 
-    /// `sign_up_or_log_in` with a nonce check of your own. A `Strict` client that
+    /// [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in) with a nonce check of your own. A [`Strict`] client that
     /// compares the nonce against one expected value should call
-    /// `sign_up_or_log_in`; this method is for a `Permissive` client or a
+    /// [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in); this method is for a [`Permissive`] client or a
     /// single-use nonce store.
     ///
     /// Verifies an identity token, looks the Apple user up through
-    /// `accounts.lookup`, exchanges the authorization code and checks that both
+    /// [`accounts.lookup`](AppleAccounts::lookup), exchanges the authorization code and checks that both
     /// tokens agree on the nonce and the Apple user — the full, safe path for a
     /// typical Sign in with Apple flow. The code is exchanged on **every**
     /// sign-in, so a user who revoked the app in their Apple ID settings and
@@ -352,36 +352,36 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// one.
     ///
     /// `nonce_checker` gets the token's `nonce` claim verbatim (`None` only
-    /// under `NoncePolicy::Permissive`), called exactly once, for
-    /// `identity_token`. `Ok(false)` is a mismatch (`SignInError::NonceMismatch`);
+    /// under [`NoncePolicy::Permissive`]), called exactly once, for
+    /// `identity_token`. `Ok(false)` is a mismatch ([`SignInError::NonceMismatch`]);
     /// `Err(e)` means the check itself failed (e.g. a database lookup) and is
-    /// returned as-is — it is already your `A::Error` — and never reported as
+    /// returned as-is — it is already your [`A::Error`](AppleAccounts::Error) — and never reported as
     /// a false mismatch. After the exchange, this method compares the
     /// exchanged `id_token`'s nonce against the identity token's
     /// already-accepted nonce with `nonce_eq` — see
     /// [Checks after the exchange](crate::_architecture#checks-after-the-exchange).
     ///
-    /// `accounts.lookup` runs after the identity token and its nonce are
-    /// verified, but before anything is spent at Apple. Its `AccountState`
+    /// [`accounts.lookup`](AppleAccounts::lookup) runs after the identity token and its nonce are
+    /// verified, but before anything is spent at Apple. Its [`AccountState`]
     /// decides the outcome and what happens when Apple can't issue a new token:
     ///
-    /// - `NotOnFile` is a new authorization: `SignInOutcome::SignedUp` carries
+    /// - [`NotOnFile`](AccountState::NotOnFile) is a new authorization: [`SignInOutcome::SignedUp`] carries
     ///   the new token, and every failure fails the sign-in.
-    /// - `AlreadyOnFile { refresh_token }` is a refresh: `SignInOutcome::LoggedIn`
+    /// - [`AlreadyOnFile { refresh_token }`](AccountState::AlreadyOnFile) is a refresh: [`SignInOutcome::LoggedIn`]
     ///   carries the new token. If Apple can't issue one — the exchange fails
-    ///   with `ErrorKind::Unavailable` or `ErrorKind::Misconfigured`, or the
+    ///   with [`ErrorKind::Unavailable`] or [`ErrorKind::Misconfigured`], or the
     ///   exchanged `id_token` can't be verified for such a reason — idunn logs
     ///   the error (`warn` and `error` level) and signs the user in with the
     ///   stored token handed back. Apple *refusing* the code
-    ///   (`ErrorKind::Rejected`) fails the sign-in; so does a nonce mismatch.
+    ///   ([`ErrorKind::Rejected`]) fails the sign-in; so does a nonce mismatch.
     ///
-    /// `Err(e)` from `lookup` is returned as-is — a lookup failure says nothing
+    /// `Err(e)` from [`lookup`](AppleAccounts::lookup) is returned as-is — a lookup failure says nothing
     /// about whether the account exists.
     ///
-    /// **Errors.** The error type is your own `A::Error`
-    /// (`AppleAccounts::Error`): your hooks' errors pass through unchanged, and
+    /// **Errors.** The error type is your own [`A::Error`](AppleAccounts::Error)
+    /// ([`AppleAccounts::Error`]): your hooks' errors pass through unchanged, and
     /// idunn's own failures are a [`SignInError`] converted through the
-    /// `From<SignInError>` the trait requires — "returns `SignInError::…`"
+    /// [`From<SignInError>`](From) the trait requires — "returns `SignInError::…`"
     /// below means exactly that. [`SignInError::kind`] classifies them for your
     /// response.
     ///
@@ -393,13 +393,13 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     ///
     /// A post-exchange rejection where the exchanged `id_token` names a
     /// different Apple user than the caller's identity token returns
-    /// `SignInError::SubjectMismatch`: the token is simply discarded, and
-    /// `accounts.schedule_revocation` is never called. Every other post-exchange
-    /// rejection (`PostExchangeRejection`: the exchanged `id_token` fails
+    /// [`SignInError::SubjectMismatch`]: the token is simply discarded, and
+    /// [`accounts.schedule_revocation`](AppleAccounts::schedule_revocation) is never called. Every other post-exchange
+    /// rejection ([`PostExchangeRejection`]: the exchanged `id_token` fails
     /// verification, or its nonce doesn't match) returns
-    /// `SignInError::RejectedAfterExchange(cause)`. For a new authorization it
+    /// [`SignInError::RejectedAfterExchange(cause)`](SignInError::RejectedAfterExchange). For a new authorization it
     /// first hands a [`PendingRevocation`] — the token, the verified identity,
-    /// the cause, and a fixed `grace_period` — to `accounts.schedule_revocation`
+    /// the cause, and a fixed [`grace_period`](PendingRevocation::grace_period) — to [`accounts.schedule_revocation`](AppleAccounts::schedule_revocation)
     /// and awaits it. The hook must file the token durably and must not revoke it
     /// inline, per [The `AppleAccounts` contract](crate#the-appleaccounts-contract);
     /// it returns `()` — a failure to file is the hook's own to log. For a
@@ -521,7 +521,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
 
     /// Verify and decode an Apple identity JWT: its signature (against Apple's
     /// published JWKS), `iss`, `aud` and `exp` are all checked, and its nonce
-    /// *presence* is enforced per the configured `NoncePolicy`. The nonce
+    /// *presence* is enforced per the configured [`NoncePolicy`]. The nonce
     /// *value* is **not** compared against anything — that step is left to the
     /// caller; see [`IdentityWithPendingNonce::nonce`].
     pub async fn verify_identity_token(
@@ -535,15 +535,15 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
 
     /// Exchange an authorization code (from `ASAuthorizationAppleIDCredential`)
     /// for Apple's refresh token, and verify the `id_token` returned alongside
-    /// it the same way `verify_identity_token` does — this call also performs a
+    /// it the same way [`verify_identity_token`](AppleAuthClient::verify_identity_token) does — this call also performs a
     /// JWKS fetch (served from the shared cache after the first), so it can
-    /// fail with `CannotVerifyToken` in addition to the token-exchange errors.
-    /// As with `verify_identity_token`, the `id_token`'s nonce *value* is still
-    /// the caller's to check: it is surfaced as `SignInDetails::nonce`.
+    /// fail with [`CannotVerifyToken`](VerificationError::CannotVerifyToken) in addition to the token-exchange errors.
+    /// As with [`verify_identity_token`](AppleAuthClient::verify_identity_token), the `id_token`'s nonce *value* is still
+    /// the caller's to check: it is surfaced as [`SignInDetails::nonce`].
     ///
     /// If the exchange succeeds but verification fails, Apple has already
     /// issued a live refresh token against a now-consumed authorization code;
-    /// the returned `CodeExchangeError::ExchangedTokenUnverified` carries that
+    /// the returned [`CodeExchangeError::ExchangedTokenUnverified`] carries that
     /// token; its documentation says when to revoke it and when to drop it.
     pub async fn exchange_authorization_code(
         &self,
@@ -645,11 +645,11 @@ async fn reject_after_exchange<A: AppleAccounts>(
     SignInError::RejectedAfterExchange(cause)
 }
 
-/// Constructs a `NoncePolicy::Strict` client — `AppleAuthClient`'s default `N`
-/// — so `with_transport`/`new` need no type annotation. The only impl naming
-/// `with_transport`/`new`: a second impl under those names, pinned to a
-/// different `N`, would make an unannotated call ambiguous. A `Permissive`
-/// client is built with `with_nonce_requirement` instead.
+/// Constructs a [`NoncePolicy::Strict`] client — [`AppleAuthClient`]'s default `N`
+/// — so [`with_transport`](AppleAuthClient::with_transport)/[`new`](AppleAuthClient::new) need no type annotation. The only impl naming
+/// [`with_transport`](AppleAuthClient::with_transport)/[`new`](AppleAuthClient::new): a second impl under those names, pinned to a
+/// different `N`, would make an unannotated call ambiguous. A [`Permissive`]
+/// client is built with [`with_nonce_requirement`](AppleAuthClient::with_nonce_requirement) instead.
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     // `transport` comes last: it is the argument callers most often leave at
     // `ReqwestTransport::default()`.
@@ -679,14 +679,14 @@ impl AppleAuthClient<transport::ReqwestTransport, Strict> {
     }
 }
 
-/// An `AppleAuthClient` that has been built but not yet given a JWKS refresh
-/// strategy: it exposes none of `verify_identity_token`,
-/// `sign_up_or_log_in`/`sign_up_or_log_in_with_nonce_checker`,
-/// `exchange_authorization_code`, `revoke_refresh_token` or
-/// `refresh_keystore`, so it cannot be used before one is chosen. Call
-/// `AppleSeed::with_background_refresh` (`tokio-refresh` feature),
+/// An [`AppleAuthClient`] that has been built but not yet given a JWKS refresh
+/// strategy: it exposes none of [`verify_identity_token`](AppleAuthClient::verify_identity_token),
+/// [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in)/[`sign_up_or_log_in_with_nonce_checker`](AppleAuthClient::sign_up_or_log_in_with_nonce_checker),
+/// [`exchange_authorization_code`](AppleAuthClient::exchange_authorization_code), [`revoke_refresh_token`](AppleAuthClient::revoke_refresh_token) or
+/// [`refresh_keystore`](AppleAuthClient::refresh_keystore), so it cannot be used before one is chosen. Call
+/// [`AppleSeed::with_background_refresh`] (`tokio-refresh` feature),
 /// [`AppleSeed::with_refresh_loop`], or — as an explicit, greppable opt-out —
-/// [`AppleSeed::without_background_refresh`] to get an `AppleAuthClient`.
+/// [`AppleSeed::without_background_refresh`] to get an [`AppleAuthClient`].
 ///
 /// Named after the apples that keep the gods young in Norse myth (see
 /// [Why "idunn"?](crate#why-idunn)): a seed has to be planted before it grows into
@@ -698,24 +698,24 @@ pub struct AppleSeed<T: HttpTransport, N: NonceRequirement = Strict> {
 }
 
 impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
-    /// Returns an `AppleAuthClient` paired with a future that keeps its JWKS
-    /// cache warm by calling `refresh_keystore()` in a loop, sleeping between
+    /// Returns an [`AppleAuthClient`] paired with a future that keeps its JWKS
+    /// cache warm by calling [`refresh_keystore()`](AppleAuthClient::refresh_keystore) in a loop, sleeping between
     /// calls with the caller-supplied `sleep`. The first tick runs
     /// immediately, before any sleep: awaiting or spawning the future warms
     /// a cold cache right away, so the first verification never pays the
     /// fetch latency itself. The loop never sleeps for less than one second,
-    /// even if the configured `VerificationConfig` would otherwise suggest
+    /// even if the configured [`VerificationConfig`] would otherwise suggest
     /// less — see `MIN_REFRESH_DELAY`.
     ///
     /// `idunn` has no runtime dependency of its own: `sleep` is how the
-    /// caller supplies its own timer (e.g. `tokio::time::sleep`, or an
+    /// caller supplies its own timer (e.g. [`tokio::time::sleep`], or an
     /// `async-io`/`smol` equivalent) without idunn depending on any one
     /// runtime. See
     /// [JWKS refresh strategy](crate::_architecture#jwks-refresh-strategy)
-    /// for `with_background_refresh`, a thin `tokio-refresh`-gated convenience
+    /// for [`with_background_refresh`](AppleSeed::with_background_refresh), a thin `tokio-refresh`-gated convenience
     /// layer built on top of this method.
     ///
-    /// The returned future holds only a `Weak` reference to the returned
+    /// The returned future holds only a [`Weak`] reference to the returned
     /// client's shared state. It does not keep the client alive, and it
     /// exits (at the latest, on its next tick) once every clone of the
     /// client has been dropped. This is what makes it safe to spawn onto an
@@ -749,21 +749,21 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
 
     /// Explicit opt-out: no background refresh is started. JWKS keys are
     /// then fetched lazily inside verification — the cold-cache fetch, and
-    /// every subsequent `refresh_interval`, are paid by whichever request
+    /// every subsequent [`refresh_interval`](VerificationConfig::refresh_interval), are paid by whichever request
     /// happens to trigger them — unless the caller drives
-    /// `AppleAuthClient::refresh_keystore` on its own schedule.
+    /// [`AppleAuthClient::refresh_keystore`] on its own schedule.
     pub fn without_background_refresh(self) -> AppleAuthClient<T, N> {
         self.client
     }
 }
 
-/// Background JWKS-refresh convenience built on `AppleSeed::with_refresh_loop`.
+/// Background JWKS-refresh convenience built on [`AppleSeed::with_refresh_loop`].
 /// See
 /// [JWKS refresh strategy](crate::_architecture#jwks-refresh-strategy)
-/// for why this takes a `Handle` as an explicit parameter, and why it sits
-/// behind the optional `tokio-refresh` feature. (`N:
-/// NonceRequirement` already implies `N: 'static`, which `handle.spawn`
-/// needs — see `NonceRequirement`'s doc in `config.rs`.)
+/// for why this takes a [`Handle`](tokio::runtime::Handle) as an explicit parameter, and why it sits
+/// behind the optional `tokio-refresh` feature. ([`N: NonceRequirement`](NonceRequirement)
+/// already implies `N: 'static`, which [`handle.spawn`](tokio::runtime::Handle::spawn)
+/// needs — see [`NonceRequirement`]'s doc in `config.rs`.)
 #[cfg(feature = "tokio-refresh")]
 impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// Spawns a background task that keeps the JWKS cache warm for as long as
@@ -781,9 +781,9 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     ///
     /// `handle` must belong to a runtime with its time driver enabled — the
     /// `#[tokio::main]` macro and `tokio::runtime::Runtime::new()` both do
-    /// this already; a hand-built `tokio::runtime::Builder` needs an explicit
-    /// `.enable_time()` (or `.enable_all()`), or the spawned task panics the
-    /// first time it calls `tokio::time::sleep`.
+    /// this already; a hand-built [`tokio::runtime::Builder`] needs an explicit
+    /// [`.enable_time()`](tokio::runtime::Builder::enable_time) (or [`.enable_all()`](tokio::runtime::Builder::enable_all)), or the spawned task panics the
+    /// first time it calls [`tokio::time::sleep`].
     #[must_use = "with_background_refresh returns the client for chaining; dropping the result discards it"]
     pub fn with_background_refresh(self, handle: tokio::runtime::Handle) -> AppleAuthClient<T, N> {
         let (client, refresh) = self.with_refresh_loop(tokio::time::sleep);
@@ -792,20 +792,20 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     }
 }
 
-/// `sign_up_or_log_in` exists only here, on a `Strict` client — see
+/// [`sign_up_or_log_in`](AppleAuthClient::sign_up_or_log_in) exists only here, on a [`Strict`] client — see
 /// [`NonceRequirement`] and
 /// [Nonce policy as a type parameter](crate::_architecture#nonce-policy-as-a-type-parameter).
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
-    /// `sign_up_or_log_in_with_nonce_checker` with a checker that compares the
+    /// [`sign_up_or_log_in_with_nonce_checker`](AppleAuthClient::sign_up_or_log_in_with_nonce_checker) with a checker that compares the
     /// claim directly against `expected_nonce` — constant-time and ASCII-case-insensitive,
     /// see `nonce_eq`. A missing nonce (`None`) is a rejection, though under
-    /// `Strict` that's moot: `verify_identity_token` already rejects a missing
-    /// nonce as `IdentityTokenRejected` before the checker runs.
+    /// [`Strict`] that's moot: [`verify_identity_token`](AppleAuthClient::verify_identity_token) already rejects a missing
+    /// nonce as [`IdentityTokenRejected`](SignInError::IdentityTokenRejected) before the checker runs.
     ///
-    /// A `Permissive` client needs `sign_up_or_log_in_with_nonce_checker`
+    /// A [`Permissive`] client needs [`sign_up_or_log_in_with_nonce_checker`](AppleAuthClient::sign_up_or_log_in_with_nonce_checker)
     /// directly, with a checker that decides what a missing nonce means for
     /// its flow (e.g. a replay-detection window from
-    /// `AppleIdentity::issued_at`/`expiration`, per `NoncePolicy`):
+    /// [`AppleIdentity::issued_at`]/[`expiration`](AppleIdentity::expiration), per [`NoncePolicy`]):
     ///
     /// ```
     /// # use idunn::{

@@ -4,8 +4,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Error verifying an Apple identity token — returned by
-/// `AppleAuthClient::verify_identity_token`, and embedded in
-/// `CodeExchangeError::ExchangedTokenUnverified` when it's the `id_token` from a
+/// [`AppleAuthClient::verify_identity_token`](crate::AppleAuthClient::verify_identity_token), and embedded in
+/// [`CodeExchangeError::ExchangedTokenUnverified`] when it's the `id_token` from a
 /// token exchange that fails verification instead.
 #[derive(Debug, Clone, Error)]
 pub enum VerificationError {
@@ -14,7 +14,7 @@ pub enum VerificationError {
     InvalidToken(InvalidTokenCause),
     /// The token's validity could not be determined (e.g. Apple's key set
     /// couldn't be fetched or is being backed off after a recent failure).
-    /// Distinct from `InvalidToken`: this is not a claim that the token is bad,
+    /// Distinct from [`InvalidToken`](VerificationError::InvalidToken): this is not a claim that the token is bad,
     /// only that verification couldn't be completed right now.
     #[error("could not verify Apple identity token: key set is unavailable")]
     CannotVerifyToken,
@@ -34,9 +34,9 @@ pub enum InvalidTokenCause {
     /// Header declares an algorithm other than the RS256 Apple actually uses. Possibly an attack.
     #[error("Apple identity token uses algorithm {0:?} instead of the expected RS256")]
     AlgorithmMismatch(jsonwebtoken::Algorithm),
-    /// The token has no `nonce` claim, and the configured `NoncePolicy`
-    /// requires one — either because the policy is `Strict` (a nonce is
-    /// required unconditionally), or because it's `Permissive` and the
+    /// The token has no `nonce` claim, and the configured [`NoncePolicy`](crate::NoncePolicy)
+    /// requires one — either because the policy is [`Strict`](crate::NoncePolicy::Strict) (a nonce is
+    /// required unconditionally), or because it's [`Permissive`](crate::NoncePolicy::Permissive) and the
     /// token's `nonce_supported` claim was `true`.
     #[error(
         "Apple identity token carries no nonce claim, which the configured nonce policy requires"
@@ -95,25 +95,25 @@ impl AppleErrorCode {
     }
 }
 
-/// The configured Apple private key (`AppleTokenConfig::private_key_pem`)
+/// The configured Apple private key ([`AppleTokenConfig::private_key_pem`](crate::AppleTokenConfig::private_key_pem))
 /// couldn't be parsed as a PEM-encoded EC key — returned by
-/// `AppleAuthClient::new`/`with_transport`.
+/// [`AppleAuthClient::new`](crate::AppleAuthClient::new)/[`with_transport`](crate::AppleAuthClient::with_transport).
 #[derive(Debug, Error)]
 #[error("invalid Apple private key: {0}")]
 pub struct InvalidPrivateKeyError(#[from] pub(crate) jsonwebtoken::errors::Error);
 
 /// Signing the client secret sent with every token-exchange/revoke request
 /// failed. In practice this should be unreachable — the private key is
-/// already validated once at `AppleAuthClient::new`/`with_transport` — but
+/// already validated once at [`AppleAuthClient::new`](crate::AppleAuthClient::new)/[`with_transport`](crate::AppleAuthClient::with_transport) — but
 /// `jsonwebtoken::encode` is itself fallible, so it is returned as a real
 /// error.
 #[derive(Debug, Error)]
 #[error("failed to sign client secret: {0}")]
 pub struct ClientSecretError(#[from] jsonwebtoken::errors::Error);
 
-/// Error from `AppleAuthClient::exchange_authorization_code`'s call to
+/// Error from [`AppleAuthClient::exchange_authorization_code`](crate::AppleAuthClient::exchange_authorization_code)'s call to
 /// Apple's token endpoint — the exchange itself; a verification failure of
-/// the resulting `id_token` is `CodeExchangeError::ExchangedTokenUnverified`
+/// the resulting `id_token` is [`CodeExchangeError::ExchangedTokenUnverified`]
 /// instead.
 #[derive(Debug, Error)]
 pub enum TokenExchangeError {
@@ -127,7 +127,7 @@ pub enum TokenExchangeError {
     InvalidTokenResponse(serde_json::Error),
 }
 
-/// Error from `AppleAuthClient::revoke_refresh_token`. [`TokenRevocationError::kind`]
+/// Error from [`AppleAuthClient::revoke_refresh_token`](crate::AppleAuthClient::revoke_refresh_token). [`TokenRevocationError::kind`]
 /// classifies it.
 #[derive(Debug, Error)]
 pub enum TokenRevocationError {
@@ -139,7 +139,7 @@ pub enum TokenRevocationError {
     TokenRevocationFailed(AppleErrorCode),
 }
 
-/// Error from `AppleAuthClient::exchange_authorization_code`.
+/// Error from [`AppleAuthClient::exchange_authorization_code`](crate::AppleAuthClient::exchange_authorization_code).
 #[derive(Debug, Error)]
 pub enum CodeExchangeError {
     #[error(transparent)]
@@ -147,14 +147,14 @@ pub enum CodeExchangeError {
     /// The authorization code was exchanged successfully, but the `id_token`
     /// Apple returned with it failed verification.
     ///
-    /// Carries `refresh_token` because the code has already been consumed and
+    /// Carries [`refresh_token`](CodeExchangeError::ExchangedTokenUnverified::refresh_token) because the code has already been consumed and
     /// the token is live at Apple. What to do with it depends on whether you
     /// already store a token for the Apple user you are signing in. If not,
     /// this is a new authorization: revoke it with
-    /// `AppleAuthClient::revoke_refresh_token`, retrying until it succeeds, or
+    /// [`AppleAuthClient::revoke_refresh_token`](crate::AppleAuthClient::revoke_refresh_token), retrying until it succeeds, or
     /// it outlives the user's chance to delete it. If you do, drop it and never
     /// revoke it: revoke is authorization-scoped and would end the stored
-    /// authorization too. `sign_up_or_log_in` makes this decision itself.
+    /// authorization too. [`sign_up_or_log_in`](crate::AppleAuthClient::sign_up_or_log_in) makes this decision itself.
     #[error("authorization code exchanged, but its identity token failed verification")]
     ExchangedTokenUnverified {
         refresh_token: RefreshToken,
@@ -163,12 +163,12 @@ pub enum CodeExchangeError {
     },
 }
 
-/// Why `AppleAuthClient::sign_up_or_log_in` rejected a sign-in *after* the
+/// Why [`AppleAuthClient::sign_up_or_log_in`](crate::AppleAuthClient::sign_up_or_log_in) rejected a sign-in *after* the
 /// authorization code was already exchanged for a live refresh token, whose
 /// owner (to idunn's best knowledge) is the caller's own Apple user; see
-/// `SignInError::RejectedAfterExchange`. For a new authorization it is carried
-/// twice: once in the `PendingRevocation` handed to `schedule_revocation`, once
-/// in `SignInError::RejectedAfterExchange`. For a known user's refresh the
+/// [`SignInError::RejectedAfterExchange`]. For a new authorization it is carried
+/// twice: once in the [`PendingRevocation`] handed to [`schedule_revocation`](crate::AppleAccounts::schedule_revocation), once
+/// in [`SignInError::RejectedAfterExchange`]. For a known user's refresh the
 /// token is dropped, so only the error carries it.
 #[derive(Debug, Clone, Error)]
 pub enum PostExchangeRejection {
@@ -181,9 +181,9 @@ pub enum PostExchangeRejection {
     NonceMismatch,
 }
 
-/// A live refresh token from a new authorization that `sign_up_or_log_in`
-/// rejected after the exchange and handed to the host's `schedule_revocation`
-/// hook, awaiting it before returning `SignInError::RejectedAfterExchange`.
+/// A live refresh token from a new authorization that [`sign_up_or_log_in`](crate::AppleAuthClient::sign_up_or_log_in)
+/// rejected after the exchange and handed to the host's [`schedule_revocation`](crate::AppleAccounts::schedule_revocation)
+/// hook, awaiting it before returning [`SignInError::RejectedAfterExchange`].
 /// A known user's refresh never produces one: that token is dropped, because
 /// revoking it would end the stored authorization too. See
 /// [Host-coordinated revocation](crate::_architecture#host-coordinated-revocation)
@@ -195,10 +195,10 @@ pub enum PostExchangeRejection {
 pub struct PendingRevocation {
     pub refresh_token: RefreshToken,
     /// Comes from the caller's *own* identity token, verified before the
-    /// exchange — this is the key (`apple_user_id` is the JWT `sub`) the host
+    /// exchange — this is the key ([`apple_user_id`](AppleIdentity::apple_user_id) is the JWT `sub`) the host
     /// files the pending revocation against. Under
-    /// `PostExchangeRejection::NonceMismatch`, the exchanged `id_token`
-    /// verified this same subject. Under `PostExchangeRejection::TokenUnverified`,
+    /// [`PostExchangeRejection::NonceMismatch`], the exchanged `id_token`
+    /// verified this same subject. Under [`PostExchangeRejection::TokenUnverified`],
     /// the exchanged token's owner could not be verified at all — see
     /// [Tokens rejected after the exchange](crate::_architecture#tokens-rejected-after-the-exchange)
     /// for the residual risk this carries.
@@ -206,17 +206,17 @@ pub struct PendingRevocation {
     pub cause: PostExchangeRejection,
     /// How long the host must wait, at minimum, before actually revoking
     /// this token — gives a fast retry a chance to land in
-    /// `AppleAccounts::lookup` and cancel this pending revocation first (see
+    /// [`AppleAccounts::lookup`](crate::AppleAccounts::lookup) and cancel this pending revocation first (see
     /// [The `AppleAccounts` contract](crate#the-appleaccounts-contract), obligation 3). Fixed by idunn;
     /// add it to your own clock when filing the job (e.g. `NOW() +
     /// grace_period` or your storage's equivalent).
     pub grace_period: Duration,
 }
 
-/// idunn's own reasons `AppleAuthClient::sign_up_or_log_in`/`sign_up_or_log_in_with_nonce_checker`
-/// failed. Those methods return the host's `AppleAccounts::Error`, which every
-/// host builds from this through `From<SignInError>`; the host's own hook
-/// failures (`AppleAccounts::lookup`, `nonce_checker`) never pass through here.
+/// idunn's own reasons [`AppleAuthClient::sign_up_or_log_in`](crate::AppleAuthClient::sign_up_or_log_in)/[`sign_up_or_log_in_with_nonce_checker`](crate::AppleAuthClient::sign_up_or_log_in_with_nonce_checker)
+/// failed. Those methods return the host's [`AppleAccounts::Error`](crate::AppleAccounts::Error), which every
+/// host builds from this through [`From<SignInError>`](From); the host's own hook
+/// failures ([`AppleAccounts::lookup`](crate::AppleAccounts::lookup), `nonce_checker`) never pass through here.
 /// [`SignInError::kind`] says how to answer each one. See
 /// [The host's own error type](crate::_architecture#the-hosts-own-error-type).
 #[derive(Debug, Error)]
@@ -239,13 +239,13 @@ pub enum SignInError {
         "the exchanged id_token is for a different Apple user than the identity token; its refresh token was discarded"
     )]
     SubjectMismatch,
-    /// Rejected after the exchange for a reason in `PostExchangeRejection`: the
+    /// Rejected after the exchange for a reason in [`PostExchangeRejection`]: the
     /// refresh token Apple issued is the caller's own and live. For a new
-    /// authorization idunn has already handed it to `schedule_revocation` (and
+    /// authorization idunn has already handed it to [`schedule_revocation`](crate::AppleAccounts::schedule_revocation) (and
     /// awaited it) before returning this; for a known user's refresh it dropped
     /// the token instead, since revoking it would end the stored authorization
     /// too. Either way nothing is left for the caller to do but answer the
-    /// request. Unlike `SubjectMismatch`, whose token belongs to another Apple
+    /// request. Unlike [`SubjectMismatch`](SignInError::SubjectMismatch), whose token belongs to another Apple
     /// user and is discarded without ever calling the hook.
     #[error("sign-in rejected after the authorization code was exchanged: {0}")]
     RejectedAfterExchange(PostExchangeRejection),
@@ -253,7 +253,7 @@ pub enum SignInError {
 
 /// How to treat a failed call — see [`SignInError::kind`] and
 /// [`TokenRevocationError::kind`], which each say what the kinds mean for
-/// their operation. One enum for every operation, like `std::io::ErrorKind`:
+/// their operation. One enum for every operation, like [`std::io::ErrorKind`]:
 /// the kinds mean the same everywhere, only the consequence differs. Plain,
 /// not `#[non_exhaustive]`, like idunn's error enums: a new kind is a new
 /// decision for the host, so it should fail to compile until the host makes it.
@@ -279,20 +279,20 @@ pub enum ErrorKind {
 
 impl SignInError {
     /// Classifies this failure for the host's response, the way
-    /// `std::io::Error::kind` classifies OS errors:
+    /// [`std::io::Error::kind`] classifies OS errors:
     ///
-    /// - `Rejected`: the sign-in was refused. Answer it as a failed login
+    /// - [`Rejected`](ErrorKind::Rejected): the sign-in was refused. Answer it as a failed login
     ///   (e.g. HTTP 401); resending the same request won't help.
-    /// - `Unavailable`: answer e.g. HTTP 503. Resending the same request only
+    /// - [`Unavailable`](ErrorKind::Unavailable): answer e.g. HTTP 503. Resending the same request only
     ///   helps while the authorization code is unspent; once an exchange was
     ///   attempted, the client needs a fresh Apple authorization. A host that
     ///   maps only the kind can't tell which, so its client should restart.
-    /// - `Misconfigured`: answer e.g. HTTP 500 and alert.
+    /// - [`Misconfigured`](ErrorKind::Misconfigured): answer e.g. HTTP 500 and alert.
     ///
     /// idunn classifies every variant, including ones a later version adds, so
-    /// a host that maps `kind()` isn't broken by a new variant — only by a new
-    /// `ErrorKind`. Match the variants themselves where you need finer detail
-    /// (e.g. logging `SubjectMismatch` as a security event). See
+    /// a host that maps [`kind()`](SignInError::kind) isn't broken by a new variant — only by a new
+    /// [`ErrorKind`]. Match the variants themselves where you need finer detail
+    /// (e.g. logging [`SubjectMismatch`](SignInError::SubjectMismatch) as a security event). See
     /// [Exhaustive error enums](crate::_architecture#exhaustive-error-enums).
     pub fn kind(&self) -> ErrorKind {
         match self {
@@ -308,10 +308,10 @@ impl TokenRevocationError {
     /// Classifies this failure for the host's revocation worker, like
     /// [`SignInError::kind`] does for sign-in:
     ///
-    /// - `Unavailable`: transient; retry later.
-    /// - `Misconfigured`: no revocation can succeed until the configuration is
+    /// - [`Unavailable`](ErrorKind::Unavailable): transient; retry later.
+    /// - [`Misconfigured`](ErrorKind::Misconfigured): no revocation can succeed until the configuration is
     ///   fixed — alert.
-    /// - `Rejected`: Apple refused the request itself (`invalid_request`, e.g.
+    /// - [`Rejected`](ErrorKind::Rejected): Apple refused the request itself (`invalid_request`, e.g.
     ///   a token stored damaged); retrying the same token won't help — alert.
     ///
     /// idunn classifies every variant, including ones a later version adds.

@@ -23,14 +23,14 @@ pub struct AppleIdentity {
     /// When the token was issued (JWT `iat`).
     pub issued_at: SystemTime,
     /// When the token expires (JWT `exp`) — already enforced by verification
-    /// itself; exposed so a replay-detection window built from `issued_at`
+    /// itself; exposed so a replay-detection window built from [`issued_at`](AppleIdentity::issued_at)
     /// can be sized consistently with it.
     pub expiration: SystemTime,
 }
 
 /// A decoded Apple identity token whose signature, `iss`, `aud` and `exp`
 /// idunn verified, and whose nonce *presence* it enforced per the configured
-/// `NoncePolicy`.
+/// [`NoncePolicy`].
 #[derive(Clone, Debug)]
 pub struct IdentityWithPendingNonce {
     /// The token's `nonce` claim, verbatim — **not** compared against
@@ -38,9 +38,9 @@ pub struct IdentityWithPendingNonce {
     /// authentication attempt; comparing this against it (however you
     /// tracked it — a session record, a hashed or async lookup) is the one
     /// verification step left to you, and skipping it leaves the flow open
-    /// to replay. `None` only when `NoncePolicy::Permissive` accepted a
-    /// token that carried no `nonce` (see `NoncePolicy`); in that case size
-    /// a replay-detection window from `identity.issued_at`/`expiration`.
+    /// to replay. `None` only when [`NoncePolicy::Permissive`] accepted a
+    /// token that carried no `nonce` (see [`NoncePolicy`]); in that case size
+    /// a replay-detection window from [`identity.issued_at`](AppleIdentity::issued_at)/[`expiration`](AppleIdentity::expiration).
     pub nonce: Option<String>,
     /// The verified identity claims.
     pub identity: AppleIdentity,
@@ -57,7 +57,7 @@ pub struct AppleEmail {
     /// documents it as `false` for Sign in with Apple at Work & School users,
     /// so absence is treated as "not verified".
     pub verified: bool,
-    /// Whether `address` is one of Apple's private relay proxy addresses.
+    /// Whether [`address`](AppleEmail::address) is one of Apple's private relay proxy addresses.
     /// Taken from the `is_private_email` claim when present; when the claim is
     /// absent, inferred from the address' `@privaterelay.appleid.com` suffix.
     pub is_private: bool,
@@ -69,7 +69,7 @@ pub enum RealUserStatus {
     /// Apple's `0` — specifically meaning real user status not being
     /// supported for web-based apps or below. iOS 14 / macOS 11. An absent real
     /// user status claim maps (not first login per user) just maps to `None`.
-    /// (see`AppleIdentity::real_user_status`)
+    /// (see[`AppleIdentity::real_user_status`])
     Unsupported,
     /// Apple's `1`.
     Unknown,

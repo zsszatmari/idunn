@@ -4,10 +4,10 @@ use thiserror::Error;
 
 /// Error from the HTTP transport used to reach Apple's endpoints — a network
 /// failure, or a non-2xx HTTP response (status code + raw body). Deliberately
-/// narrower than `IdunnError`: this is also what external `HttpTransport`
+/// narrower than `IdunnError`: this is also what external [`HttpTransport`]
 /// implementors construct, and they shouldn't need to know about idunn's
-/// Apple-specific error variants. `Network` holds a boxed error
-/// so a non-reqwest `HttpTransport` implementation can report its own
+/// Apple-specific error variants. [`Network`](TransportError::Network) holds a boxed error
+/// so a non-reqwest [`HttpTransport`] implementation can report its own
 /// underlying error type.
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -19,10 +19,10 @@ pub enum TransportError {
 
 /// Abstraction over GET requests needed to talk to Apple's endpoints (currently just
 /// JWKS fetching). Split out from `HttpPostForm` so read-only call sites can bound on
-/// this alone and need no `post_form` implementation.
+/// this alone and need no [`post_form`](HttpPost::post_form) implementation.
 pub trait HttpGet: Clone + Send + Sync + 'static {
     /// GETs a resource, returning the response body on success (2xx) or a
-    /// `TransportError` on failure. No body is sent; `headers` and `timeout` are
+    /// [`TransportError`] on failure. No body is sent; `headers` and `timeout` are
     /// mandatory — callers must decide how long they're willing to wait, there is no
     /// implicit default.
     fn get(
@@ -34,9 +34,9 @@ pub trait HttpGet: Clone + Send + Sync + 'static {
 }
 
 /// Abstraction over POST-form requests needed to talk to Apple's token endpoints.
-/// Split out from `HttpGet` so write-only call sites can bound on this alone.
+/// Split out from [`HttpGet`] so write-only call sites can bound on this alone.
 pub trait HttpPost: Clone + Send + Sync + 'static {
-    /// POSTs a body, returning the response body on success (2xx) or a `TransportError`
+    /// POSTs a body, returning the response body on success (2xx) or a [`TransportError`]
     /// (network failure, or the raw status/body on non-2xx). `body` is already
     /// url-encoded by idunn — implementors only send it. `headers` are the header key/value pairs the caller wants attached
     /// (e.g. `Content-Type`) — implementors attach them as given, they don't assume or
@@ -54,7 +54,7 @@ pub trait HttpPost: Clone + Send + Sync + 'static {
 /// Combined GET + POST-form capability. Exists so the transport is swappable (idunn
 /// consumers may prefer a differently configured or non-reqwest client) and so tests
 /// can substitute an in-memory fake for the network. Implemented
-/// automatically for any type that has both `HttpGet` and `HttpPostForm` — implement
+/// automatically for any type that has both [`HttpGet`] and `HttpPostForm` — implement
 /// those two traits.
 pub trait HttpTransport: HttpGet + HttpPost {}
 impl<T: HttpGet + HttpPost> HttpTransport for T {}
