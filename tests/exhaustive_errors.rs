@@ -1,7 +1,6 @@
 //! Compiles only while idunn's public error enums, and `ErrorKind`, are
 //! exhaustive: a `#[non_exhaustive]` enum would force a wildcard arm on this
-//! crate-external code. See src/docs/architecture.md, "Why the error enums are
-//! exhaustive".
+//! crate-external code. See src/docs/architecture.md, "Exhaustive error enums".
 
 use idunn::{
     AppleErrorCode, CodeExchangeError, ErrorKind, InvalidTokenCause, PostExchangeRejection,

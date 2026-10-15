@@ -42,7 +42,7 @@ A SHA pin is exact by design, so nothing moves it forward on its own — `.githu
 
 ## Why the feature-matrix recipes skip zero- and two-backend combinations
 
-This follows from the compile-time backend guard described in src/docs/architecture.md, "Why exactly one crypto backend is enforced at compile time".
+This follows from the compile-time backend guard described in src/docs/architecture.md, "Crypto backend".
 
 Every recipe that iterates feature combinations has to skip the zero- and two-backend states: the compile-time guard makes them fail to build. `check-features`, `check-powerset`, `check-powerset-full` and `test-features` (`justfile`) all pass `--mutually-exclusive-features aws_lc_rs,rust_crypto --at-least-one-of aws_lc_rs,rust_crypto` to cargo-hack; both flags require `--feature-powerset`, which `check-features` and `test-features` therefore use. `check-features` runs at `--depth 1`: each crypto backend compiles in isolation. `test-fixtures`/`tokio-refresh` don't get a standalone run in this recipe, because a standalone run also needs a backend; `check-powerset-full`'s full powerset still covers them.
 
@@ -96,7 +96,7 @@ Rejected alternatives:
 The two files live in `src/docs/` because rustdoc is their primary reader, the same standing as the `///` comments in `src/*.rs`. The README links into them through link definitions that `src/lib.rs` overrides, see "Why the README is the crate root documentation". Their intra-doc links are valid on docs.rs for every version at every moment; GitHub shows them as inert text, as it does in the doc comments.
 
 - The `_` prefix marks the module as no API. It is public, so cargo-semver-checks treats removing or renaming it as a breaking change; keep the name.
-- Heading anchors (`#why-…`) derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` for the old title and update the links.
+- Heading anchors derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` for the old title and update the links.
 - `src/docs/architecture.md` has no top-level heading: rustdoc takes the module's summary line from the first block, so the intro paragraph comes first.
 - `just doc-links` excludes rustdoc's own source-view links (`.rs.html#12-14`): JavaScript creates those line anchors, so a static check cannot find them.
 - `just doc-links` also excludes one link, `dispatcher#setting-the-default-subscriber`. Every type page lists tracing's blanket impls (`WithSubscriber`, `Instrument`) with their docs, and rustdoc leaves the intra-doc links in those docs unresolved. The text is tracing's and the rendering is rustdoc's, so idunn cannot fix it. lychee skips the other unresolved links there (`super::Subscriber`, `crate::Span`) because they are not file URLs. Any other broken link, including a new one from a dependency, still fails the check. Remove the exclusion once rustdoc resolves these links. Rejected: excluding every href whose last path segment has no file extension, which would also hide later breakage of the same kind.

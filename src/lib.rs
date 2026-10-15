@@ -14,7 +14,7 @@
 
 // jsonwebtoken can't auto-select a CryptoProvider when both backends are enabled, and has
 // none to use when neither is: either case panics at first use.
-// See "Why exactly one crypto backend is enforced at compile time" in src/docs/architecture.md.
+// See "Crypto backend" in src/docs/architecture.md.
 #[cfg(all(feature = "aws_lc_rs", feature = "rust_crypto"))]
 compile_error!(
     "features \"aws_lc_rs\" and \"rust_crypto\" are mutually exclusive: enable exactly one \
@@ -81,9 +81,8 @@ const REVOCATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
 
 /// ASCII-case-insensitive and constant-time: case-insensitivity handles clients
 /// that hex-encode in upper case, constant time protects a server-side-secret
-/// `expected_nonce` from a timing side channel — see src/docs/architecture.md for
-/// the limits of that protection. Used by `sign_up_or_log_in`, and internally
-/// by `sign_up_or_log_in_with_nonce_checker` to compare the exchanged
+/// `expected_nonce` from a timing side channel. Used by `sign_up_or_log_in`, and
+/// internally by `sign_up_or_log_in_with_nonce_checker` to compare the exchanged
 /// `id_token`'s nonce against the identity token's already-accepted nonce.
 fn nonce_eq(candidate: Option<&str>, expected: &str) -> bool {
     let Some(candidate) = candidate else {
@@ -120,7 +119,7 @@ pub struct SignInDetails {
 /// exchanges the authorization code; this decides what the exchange means —
 /// a refresh of the stored token or a new authorization — and what idunn can
 /// fall back to when Apple can't issue a new token. See
-/// [Why every sign-in exchanges the authorization code](crate::_architecture#why-every-sign-in-exchanges-the-authorization-code).
+/// [Every sign-in exchanges the code](crate::_architecture#every-sign-in-exchanges-the-code).
 #[derive(Debug, Clone)]
 pub enum AccountState {
     /// A refresh token is stored for this Apple user. This sign-in refreshes
@@ -173,8 +172,8 @@ impl SignInOutcome {
 /// The host's account storage, as `sign_up_or_log_in` sees it: both storage
 /// hooks of a sign-in, on one type. The obligations are in
 /// [The `AppleAccounts` contract](crate#the-appleaccounts-contract); the reasoning in
-/// [Why the account hooks are one `AppleAccounts` trait](crate::_architecture#why-the-account-hooks-are-one-appleaccounts-trait)
-/// and [Why sign-in returns the host's own error type](crate::_architecture#why-sign-in-returns-the-hosts-own-error-type).
+/// [One `AppleAccounts` trait](crate::_architecture#one-appleaccounts-trait)
+/// and [The host's own error type](crate::_architecture#the-hosts-own-error-type).
 /// Implement it with `async fn`.
 pub trait AppleAccounts: Sync {
     /// Your own error type, and what `sign_up_or_log_in` returns: `lookup`'s
@@ -217,7 +216,7 @@ struct Credentials {
 ///
 /// One client with one constructor, covering both identity verification and token
 /// exchange even though they touch mostly-disjoint code. See
-/// [Why `AppleAuthClient` is one client with one constructor](crate::_architecture#why-appleauthclient-is-one-client-with-one-constructor)
+/// [One client, one constructor](crate::_architecture#one-client-one-constructor)
 /// for why they're bundled together.
 /// Clonable by design.
 ///
@@ -225,7 +224,7 @@ struct Credentials {
 /// identity-token verification enforces, and whether
 /// `sign_up_or_log_in` exists on this client — see
 /// [`NonceRequirement`] and
-/// [Why the nonce policy is a type parameter](crate::_architecture#why-the-nonce-policy-is-a-type-parameter).
+/// [Nonce policy as a type parameter](crate::_architecture#nonce-policy-as-a-type-parameter).
 #[derive(Clone)]
 pub struct AppleAuthClient<T: HttpTransport, N: NonceRequirement = Strict> {
     identity_verification: Arc<identity_verification::IdentityVerificationClient<T>>,
@@ -360,7 +359,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// a false mismatch. After the exchange, this method compares the
     /// exchanged `id_token`'s nonce against the identity token's
     /// already-accepted nonce with `nonce_eq` — see
-    /// [Why the exchanged nonce is compared against the identity token's](crate::_architecture#why-the-exchanged-nonce-is-compared-against-the-identity-tokens).
+    /// [Checks after the exchange](crate::_architecture#checks-after-the-exchange).
     ///
     /// `accounts.lookup` runs after the identity token and its nonce are
     /// verified, but before anything is spent at Apple. Its `AccountState`
@@ -407,13 +406,11 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// refresh the new token is dropped, never revoked: revoking is
     /// authorization-scoped and would end the stored authorization too. The
     /// reasoning is in
-    /// [Why `sign_up_or_log_in` never revokes, and discards another user's token](crate::_architecture#why-sign_up_or_log_in-never-revokes-and-discards-another-users-token),
-    /// [Why a post-exchange rejection goes through `schedule_revocation`](crate::_architecture#why-a-post-exchange-rejection-goes-through-schedule_revocation)
-    /// and [Why a refreshed token replaces the stored one and is never revoked](crate::_architecture#why-a-refreshed-token-replaces-the-stored-one-and-is-never-revoked).
-    // See src/docs/architecture.md: "Why the nonce checker is
-    // `FnOnce(Option<String>) -> Fut`" — only `nonce_checker`
-    // follows that reasoning. The two storage hooks are `AppleAccounts`
-    // methods, see "Why the account hooks are one `AppleAccounts` trait".
+    /// [Tokens rejected after the exchange](crate::_architecture#tokens-rejected-after-the-exchange)
+    /// and [Revocation is authorization-scoped](crate::_architecture#revocation-is-authorization-scoped).
+    // See src/docs/architecture.md: "The nonce checker's signature" — only
+    // `nonce_checker` follows that reasoning. The two storage hooks are
+    // `AppleAccounts` methods, see "One `AppleAccounts` trait".
     pub async fn sign_up_or_log_in_with_nonce_checker<F, Fut, A>(
         &self,
         identity_token: &str,
@@ -479,13 +476,13 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
         // Checked before the nonce: a stolen authorization code paired with the
         // caller's identity token carries the *thief's* own nonce, which would
         // otherwise be classified as an ordinary `NonceMismatch` and hand a
-        // stranger's token back for revocation. See src/docs/architecture.md.
+        // stranger's token back for revocation. See src/docs/architecture.md,
+        // "Checks after the exchange".
         if details.identity.apple_user_id != verified.identity.apple_user_id {
             return Err(SignInError::SubjectMismatch.into());
         }
 
-        // See src/docs/architecture.md, "Why the exchanged nonce is compared
-        // against the identity token's".
+        // See src/docs/architecture.md, "Checks after the exchange".
         let nonces_match = match (verified.nonce.as_deref(), details.nonce.as_deref()) {
             (Some(expected), candidate) => nonce_eq(candidate, expected),
             (None, None) => true,
@@ -575,7 +572,8 @@ impl<T: HttpTransport, N: NonceRequirement> AppleAuthClient<T, N> {
     /// Revoke a refresh token previously issued by Apple (e.g. on sign-out or account
     /// deletion) so it can no longer be used. `Ok(())` means the token is not
     /// usable any more — either because this call revoked it, or because Apple
-    /// already considered it invalid (`invalid_grant`, logged at `warn` level).
+    /// already considered it invalid (`invalid_grant`, logged at `warn` level, or
+    /// a plain 200 indistinguishable from a revocation).
     /// A failure's [`TokenRevocationError::kind`] says how to treat it.
     pub async fn revoke_refresh_token(
         &self,
@@ -626,12 +624,10 @@ fn logged_in_with_stored_token(
 /// Only for a new authorization: the refresh token is live at Apple and
 /// deliberately left unrevoked by idunn — revoking is authorization-scoped and
 /// could tear down a concurrent sign-in for the same Apple user
-/// (src/docs/architecture.md, "Why revocations are coordinated by the host,
-/// through `AppleAccounts`"). It goes to the host's
-/// `AppleAccounts::schedule_revocation` instead, awaited before the error is
-/// returned, so the error itself carries no token to lose — see "Why a
-/// post-exchange rejection goes through `schedule_revocation`". A refresh's
-/// token is dropped instead.
+/// (src/docs/architecture.md, "Host-coordinated revocation"). It goes to the
+/// host's `AppleAccounts::schedule_revocation` instead, awaited before the
+/// error is returned, so the error itself carries no token to lose — see
+/// "Tokens rejected after the exchange". A refresh's token is dropped instead.
 async fn reject_after_exchange<A: AppleAccounts>(
     accounts: &A,
     refresh_token: RefreshToken,
@@ -695,7 +691,7 @@ impl AppleAuthClient<transport::ReqwestTransport, Strict> {
 /// Named after the apples that keep the gods young in Norse myth (see
 /// [Why "idunn"?](crate#why-idunn)): a seed has to be planted before it grows into
 /// a client. See
-/// [Why the JWKS refresh strategy is chosen at construction](crate::_architecture#why-the-jwks-refresh-strategy-is-chosen-at-construction).
+/// [JWKS refresh strategy](crate::_architecture#jwks-refresh-strategy).
 #[must_use = "an AppleSeed becomes an AppleAuthClient only via with_background_refresh, with_refresh_loop or without_background_refresh"]
 pub struct AppleSeed<T: HttpTransport, N: NonceRequirement = Strict> {
     client: AppleAuthClient<T, N>,
@@ -715,7 +711,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// caller supplies its own timer (e.g. `tokio::time::sleep`, or an
     /// `async-io`/`smol` equivalent) without idunn depending on any one
     /// runtime. See
-    /// [Why the JWKS refresh strategy is chosen at construction](crate::_architecture#why-the-jwks-refresh-strategy-is-chosen-at-construction)
+    /// [JWKS refresh strategy](crate::_architecture#jwks-refresh-strategy)
     /// for `with_background_refresh`, a thin `tokio-refresh`-gated convenience
     /// layer built on top of this method.
     ///
@@ -763,7 +759,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
 
 /// Background JWKS-refresh convenience built on `AppleSeed::with_refresh_loop`.
 /// See
-/// [Why the JWKS refresh strategy is chosen at construction](crate::_architecture#why-the-jwks-refresh-strategy-is-chosen-at-construction)
+/// [JWKS refresh strategy](crate::_architecture#jwks-refresh-strategy)
 /// for why this takes a `Handle` as an explicit parameter, and why it sits
 /// behind the optional `tokio-refresh` feature. (`N:
 /// NonceRequirement` already implies `N: 'static`, which `handle.spawn`
@@ -798,7 +794,7 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
 
 /// `sign_up_or_log_in` exists only here, on a `Strict` client — see
 /// [`NonceRequirement`] and
-/// [Why the nonce policy is a type parameter](crate::_architecture#why-the-nonce-policy-is-a-type-parameter).
+/// [Nonce policy as a type parameter](crate::_architecture#nonce-policy-as-a-type-parameter).
 impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     /// `sign_up_or_log_in_with_nonce_checker` with a checker that compares the
     /// claim directly against `expected_nonce` — constant-time and ASCII-case-insensitive,
@@ -1630,8 +1626,8 @@ mod tests {
     /// An unverifiable exchanged `id_token` leaves a live refresh token behind
     /// that `sign_up_or_log_in` hands to `schedule_revocation`, and awaits,
     /// before returning — no revoke attempt — for the host to revoke after
-    /// the call returns. See src/docs/architecture.md, "Why revocations are
-    /// coordinated by the host, through `AppleAccounts`".
+    /// the call returns. See src/docs/architecture.md, "Host-coordinated
+    /// revocation".
     #[tokio::test]
     async fn sign_up_or_log_in_schedules_revocation_for_an_unverifiable_exchanged_token() {
         let config = test_token_config();
@@ -1705,8 +1701,8 @@ mod tests {
     /// Regression test for the identity-confusion gap this crate's
     /// `sign_up_or_log_in` closes: pairing one Apple user's identity token
     /// with an authorization code that resolves to a different Apple user.
-    /// The token is simply discarded: see src/docs/architecture.md, "Why
-    /// `sign_up_or_log_in` never revokes, and discards another user's token".
+    /// The token is simply discarded: see src/docs/architecture.md, "Tokens
+    /// rejected after the exchange".
     /// Also pins that `SubjectMismatch` never calls `schedule_revocation`.
     #[tokio::test]
     async fn sign_up_or_log_in_discards_the_token_when_the_exchanged_id_token_is_for_another_user()

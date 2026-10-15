@@ -123,7 +123,7 @@ pub(crate) struct IdentityVerificationClient<T: HttpGet> {
     jwks_store: JwksStore<T>,
     validation: Validation,
     // Comes from `AppleAuthClient`'s `N: NonceRequirement` type parameter — see
-    // src/docs/architecture.md ("Why the nonce policy is a type parameter").
+    // src/docs/architecture.md ("Nonce policy as a type parameter").
     nonce_policy: NoncePolicy,
 }
 

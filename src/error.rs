@@ -186,10 +186,8 @@ pub enum PostExchangeRejection {
 /// hook, awaiting it before returning `SignInError::RejectedAfterExchange`.
 /// A known user's refresh never produces one: that token is dropped, because
 /// revoking it would end the stored authorization too. See
-/// [Why revocations are coordinated by the host, through
-/// `AppleAccounts`](crate::_architecture#why-revocations-are-coordinated-by-the-host-through-appleaccounts)
-/// and [Why a post-exchange rejection goes through
-/// `schedule_revocation`](crate::_architecture#why-a-post-exchange-rejection-goes-through-schedule_revocation).
+/// [Host-coordinated revocation](crate::_architecture#host-coordinated-revocation)
+/// and [Tokens rejected after the exchange](crate::_architecture#tokens-rejected-after-the-exchange).
 /// idunn never revokes it itself. The hook files it durably for later
 /// revocation, per [The `AppleAccounts` contract](crate#the-appleaccounts-contract),
 /// obligation 5.
@@ -202,7 +200,7 @@ pub struct PendingRevocation {
     /// `PostExchangeRejection::NonceMismatch`, the exchanged `id_token`
     /// verified this same subject. Under `PostExchangeRejection::TokenUnverified`,
     /// the exchanged token's owner could not be verified at all — see
-    /// [Why `sign_up_or_log_in` never revokes, and discards another user's token](crate::_architecture#why-sign_up_or_log_in-never-revokes-and-discards-another-users-token)
+    /// [Tokens rejected after the exchange](crate::_architecture#tokens-rejected-after-the-exchange)
     /// for the residual risk this carries.
     pub identity: AppleIdentity,
     pub cause: PostExchangeRejection,
@@ -220,7 +218,7 @@ pub struct PendingRevocation {
 /// host builds from this through `From<SignInError>`; the host's own hook
 /// failures (`AppleAccounts::lookup`, `nonce_checker`) never pass through here.
 /// [`SignInError::kind`] says how to answer each one. See
-/// [Why sign-in returns the host's own error type](crate::_architecture#why-sign-in-returns-the-hosts-own-error-type).
+/// [The host's own error type](crate::_architecture#the-hosts-own-error-type).
 #[derive(Debug, Error)]
 pub enum SignInError {
     // --- BEFORE the exchange: nothing was spent at Apple, no token exists ---
@@ -236,7 +234,7 @@ pub enum SignInError {
     /// code paired with this identity token, possibly a malicious client. That user's refresh
     /// token was discarded: revoking would end their whole authorization of this app. Nothing
     /// is left for the caller to do. See
-    /// [Why `sign_up_or_log_in` never revokes, and discards another user's token](crate::_architecture#why-sign_up_or_log_in-never-revokes-and-discards-another-users-token).
+    /// [Tokens rejected after the exchange](crate::_architecture#tokens-rejected-after-the-exchange).
     #[error(
         "the exchanged id_token is for a different Apple user than the identity token; its refresh token was discarded"
     )]
@@ -295,7 +293,7 @@ impl SignInError {
     /// a host that maps `kind()` isn't broken by a new variant — only by a new
     /// `ErrorKind`. Match the variants themselves where you need finer detail
     /// (e.g. logging `SubjectMismatch` as a security event). See
-    /// [Why the error enums are exhaustive](crate::_architecture#why-the-error-enums-are-exhaustive).
+    /// [Exhaustive error enums](crate::_architecture#exhaustive-error-enums).
     pub fn kind(&self) -> ErrorKind {
         match self {
             SignInError::IdentityTokenRejected(err) => err.kind(),
@@ -317,7 +315,7 @@ impl TokenRevocationError {
     ///   a token stored damaged); retrying the same token won't help — alert.
     ///
     /// idunn classifies every variant, including ones a later version adds.
-    /// See [Why the error enums are exhaustive](crate::_architecture#why-the-error-enums-are-exhaustive).
+    /// See [Exhaustive error enums](crate::_architecture#exhaustive-error-enums).
     pub fn kind(&self) -> ErrorKind {
         match self {
             TokenRevocationError::NetworkError(_) => ErrorKind::Unavailable,
