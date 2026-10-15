@@ -89,7 +89,7 @@ match outcome {
 apple.revoke_refresh_token(&stored_refresh_token).await?;
 ```
 
-What `lookup` and `schedule_revocation` must guarantee, and how to run the revocation queue, is described in the crate-level documentation on docs.rs, section "The `AppleAccounts` contract".
+What `lookup` and `schedule_revocation` must guarantee, and how to run the revocation queue, is described in [The `AppleAccounts` contract][contract].
 
 ## Highlights 
 
@@ -99,7 +99,7 @@ What `lookup` and `schedule_revocation` must guarantee, and how to run the revoc
 - **An injectable HTTP transport**, so you can bring your own HTTP client. reqwest is supported out of the box.
 - **Mutation-tested.** CI fails when cargo-mutants finds a code change that no test catches, or when line coverage drops below 90%.
 
-What it deliberately does not do: store anything, decide who "owns" an Apple account, or coordinate concurrent sign-ins and revocations for the same user — that needs a shared view of your own application state, so it's your job, but it's guided by the `AppleAccounts` trait you implement. The crate-level documentation on docs.rs describes that contract, and the `idunn::_architecture` module there explains the reasoning behind the crate's design.
+What it deliberately does not do: store anything, decide who "owns" an Apple account, or coordinate concurrent sign-ins and revocations for the same user — that needs a shared view of your own application state, so it's your job, but it's guided by the `AppleAccounts` trait you implement. [The `AppleAccounts` contract][contract] describes it, and [`idunn::_architecture`][architecture] explains the reasoning behind the crate's design.
 
 ## Getting started
 
@@ -110,7 +110,7 @@ Add the crate, pick a crypto backend feature (`aws_lc_rs`, the default, or `rust
 idunn = { version = "0.1", features = ["reqwest", "tokio-refresh"] }
 ```
 
-`tokio-refresh` adds `with_background_refresh`; without it, see `with_refresh_loop` in the crate-level documentation.
+`tokio-refresh` adds `with_background_refresh`; without it, see [`with_refresh_loop`][with_refresh_loop].
 
 The minimum supported Rust version is 1.88.
 
@@ -147,7 +147,7 @@ If you feel an entry is wrong or out of date, please open an issue.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/zsszatmari/idunn/blob/main/CONTRIBUTING.md).
 
 ## Why "idunn"?
 
@@ -155,4 +155,8 @@ In Norse mythology, Iðunn is the goddess who keeps the gods' apples — the one
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Dual-licensed under [MIT](https://github.com/zsszatmari/idunn/blob/main/LICENSE-MIT) or [Apache-2.0](https://github.com/zsszatmari/idunn/blob/main/LICENSE-APACHE), at your option.
+
+[contract]: https://docs.rs/idunn/latest/idunn/#the-appleaccounts-contract
+[architecture]: https://docs.rs/idunn/latest/idunn/_architecture/index.html
+[with_refresh_loop]: https://docs.rs/idunn/latest/idunn/struct.AppleSeed.html#method.with_refresh_loop

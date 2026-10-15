@@ -1,5 +1,12 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// The README opens the crate docs. The link definitions come first, so they
+// win over the README's docs.rs URLs. See docs/maintaining.md, "Why the
+// README is the crate root documentation".
+//! [contract]: crate#the-appleaccounts-contract
+//! [architecture]: crate::_architecture
+//! [with_refresh_loop]: crate::AppleSeed::with_refresh_loop
+#![cfg_attr(not(doctest), doc = include_str!("../README.md"))]
 #![doc = include_str!("docs/usage.md")]
 // https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple
 // https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens
@@ -680,7 +687,7 @@ impl AppleAuthClient<transport::ReqwestTransport, Strict> {
 /// [`AppleSeed::without_background_refresh`] to get an `AppleAuthClient`.
 ///
 /// Named after the apples that keep the gods young in Norse myth (see
-/// README, "Why \"idunn\"?"): a seed has to be planted before it grows into
+/// [Why "idunn"?](crate#why-idunn)): a seed has to be planted before it grows into
 /// a client. See
 /// [Why the JWKS refresh strategy is chosen at construction](crate::_architecture#why-the-jwks-refresh-strategy-is-chosen-at-construction).
 #[must_use = "an AppleSeed becomes an AppleAuthClient only via with_background_refresh, with_refresh_loop or without_background_refresh"]

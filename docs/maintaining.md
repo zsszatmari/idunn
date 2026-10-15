@@ -62,11 +62,28 @@ docs.rs builds default features only, which would hide `ReqwestTransport`, `Appl
 - `#![cfg_attr(docsrs, feature(doc_cfg))]` produces the "Available on crate feature … only" badges. `doc_cfg` is nightly-only; `cfg(docsrs)` is set only by docs.rs and `just doc`, so stable builds never see the feature gate. The older `doc_auto_cfg` no longer exists; its behaviour is part of `doc_cfg`.
 - The feature list appears in both `Cargo.toml` and the `just doc` recipe. Change them together.
 
+## Why the README is the crate root documentation
+
+docs.rs opens on the crate root, and the README is idunn's introduction, so `src/lib.rs` includes it there, followed by `src/docs/usage.md`. RustCrypto, getrandom, rand_core and schemars include their READMEs the same way; most well-known crates keep README and crate docs separate.
+
+The README is read on GitHub, crates.io and docs.rs, which constrains it:
+
+- Its Rust example has no hidden `#` lines: GitHub and crates.io show them verbatim, and crates.io declined to hide them (rust-lang/crates.io#8325). `cfg_attr(not(doctest), …)` keeps rustdoc from collecting the example as a doctest. `tests/readme_example.rs` compiles a copy of it inside the scaffolding it needs and fails when the copy and the README differ, so edit both together.
+- Links into the crate docs are reference-style. The README defines each name with its docs.rs URL; `src/lib.rs` defines the same name as an intra-doc link before including the README. CommonMark uses the first definition of a name, so docs.rs gets a link that matches the version being read, checked by rustdoc and `just doc-links`, and GitHub and crates.io get the docs.rs URL. A name missing from `src/lib.rs` still resolves on docs.rs through the README's URL, unchecked. The technique is from https://linebender.org/blog/doc-include/.
+- Other links are absolute URLs, since a relative link such as `CONTRIBUTING.md` resolves on GitHub only.
+- The badges, the crate comparison and the license section appear on docs.rs as well.
+
+Rejected alternatives:
+
+- The README example as a doctest marked `ignore`: rustdoc labels it "This example is not tested" at the top of the front page, and nothing compiles it.
+- Generating the README from the crate docs with cargo-rdme: among the top 200 crates only the ICU4X repository uses it, and its intra-doc link resolution needs a pinned nightly in CI.
+- Separate README and crate docs, with the README doctested through a hidden `#[cfg(doctest)]` item as clap does: docs.rs would open on the usage guide.
+
 ## Why the design rationale is an embedded module
 
 `src/docs/architecture.md` is part of the crate as `idunn::_architecture` (`#[doc = include_str!(...)]` on an empty `pub mod` in `src/lib.rs`), and the API docs and `src/docs/usage.md` link into its sections. The rationale on docs.rs therefore matches the published version, works offline, and rustdoc checks the module path of every link.
 
-The two files live in `src/docs/` because rustdoc is their primary reader, the same standing as the `///` comments in `src/*.rs`. The README does not link them. Their intra-doc links are valid on docs.rs for every version at every moment; GitHub shows them as inert text, as it does in the doc comments.
+The two files live in `src/docs/` because rustdoc is their primary reader, the same standing as the `///` comments in `src/*.rs`. The README links into them through link definitions that `src/lib.rs` overrides, see "Why the README is the crate root documentation". Their intra-doc links are valid on docs.rs for every version at every moment; GitHub shows them as inert text, as it does in the doc comments.
 
 - The `_` prefix marks the module as no API. It is public, so cargo-semver-checks treats removing or renaming it as a breaking change; keep the name.
 - Heading anchors (`#why-…`) derive from the heading text, and rustdoc does not check them. `just doc-links` runs lychee with fragment checking over the generated HTML in CI. Renaming a heading changes its anchor: grep `src/` for the old title and update the links.
