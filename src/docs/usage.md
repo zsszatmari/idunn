@@ -8,23 +8,35 @@ Every constructor (`AppleAuthClient::new`, `with_transport`, `with_nonce_require
 
 With the `tokio-refresh` feature, spawn onto a `Handle`:
 
-```ignore
+```
+# use idunn::{AppleAuthClient, AppleTokenConfig};
+# fn example(token_config: AppleTokenConfig) -> Result<(), Box<dyn std::error::Error>> {
 let client = AppleAuthClient::new(token_config)?
     .with_background_refresh(tokio::runtime::Handle::current());
+# Ok(())
+# }
 ```
 
 On any other executor, drive the returned future yourself:
 
-```ignore
+```
+# use idunn::{AppleAuthClient, AppleTokenConfig};
+# fn example(token_config: AppleTokenConfig) -> Result<(), Box<dyn std::error::Error>> {
 let (client, refresh) = AppleAuthClient::new(token_config)?
     .with_refresh_loop(smol::Timer::after);
 smol::spawn(refresh).detach();
+# Ok(())
+# }
 ```
 
 To opt out entirely — JWKS keys are then fetched lazily inside verification, with the cold-cache fetch and every subsequent refresh paid by whichever request triggers it, unless you drive `AppleAuthClient::refresh_keystore` yourself:
 
-```ignore
+```
+# use idunn::{AppleAuthClient, AppleTokenConfig};
+# fn example(token_config: AppleTokenConfig) -> Result<(), Box<dyn std::error::Error>> {
 let client = AppleAuthClient::new(token_config)?.without_background_refresh();
+# Ok(())
+# }
 ```
 
 ## Signing in: `sign_up_or_log_in`

@@ -720,10 +720,14 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// executor and forget — the task cannot outlive the client and keep
     /// polling Apple forever.
     ///
-    /// ```ignore
+    /// ```
+    /// # use idunn::{AppleAuthClient, AppleTokenConfig};
+    /// # fn example(token_config: AppleTokenConfig) -> Result<(), Box<dyn std::error::Error>> {
     /// let (client, refresh) = AppleAuthClient::new(token_config)?
     ///     .with_refresh_loop(smol::Timer::after);
     /// smol::spawn(refresh).detach();
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use = "the returned future must be spawned or awaited, or the JWKS cache is never kept warm"]
     pub fn with_refresh_loop<S, Fut>(
@@ -764,9 +768,13 @@ impl<T: HttpTransport, N: NonceRequirement> AppleSeed<T, N> {
     /// any clone of the returned client is alive, then returns the client so
     /// this can be chained straight onto a constructor:
     ///
-    /// ```ignore
+    /// ```
+    /// # use idunn::{AppleAuthClient, AppleTokenConfig};
+    /// # fn example(token_config: AppleTokenConfig) -> Result<(), Box<dyn std::error::Error>> {
     /// let client = AppleAuthClient::new(token_config)?
     ///     .with_background_refresh(tokio::runtime::Handle::current());
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// `handle` must belong to a runtime with its time driver enabled — the
@@ -797,7 +805,43 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     /// its flow (e.g. a replay-detection window from
     /// `AppleIdentity::issued_at`/`expiration`, per `NoncePolicy`):
     ///
-    /// ```ignore
+    /// ```
+    /// # use idunn::{
+    /// #     AccountState, AppleAccounts, AppleAuthClient, PendingRevocation, Permissive,
+    /// #     ReqwestTransport, SignInError, SignInOutcome,
+    /// # };
+    /// # #[derive(Debug, thiserror::Error)]
+    /// # #[error("my error")]
+    /// # struct MyError;
+    /// # impl From<SignInError> for MyError {
+    /// #     fn from(_: SignInError) -> Self {
+    /// #         MyError
+    /// #     }
+    /// # }
+    /// # struct Accounts;
+    /// # impl AppleAccounts for Accounts {
+    /// #     type Error = MyError;
+    /// #     async fn lookup(&self, _: &idunn::AppleIdentity) -> Result<AccountState, MyError> {
+    /// #         todo!()
+    /// #     }
+    /// #     async fn schedule_revocation(&self, _: PendingRevocation) {
+    /// #         todo!()
+    /// #     }
+    /// # }
+    /// # struct ReplayStore;
+    /// # impl ReplayStore {
+    /// #     async fn check_and_record(&self, _: &str) -> Result<bool, MyError> {
+    /// #         todo!()
+    /// #     }
+    /// # }
+    /// # async fn example(
+    /// #     client: &AppleAuthClient<ReqwestTransport, Permissive>,
+    /// #     identity_token: &str,
+    /// #     code: &str,
+    /// #     expected_nonce: String,
+    /// #     accounts: Accounts,
+    /// #     my_replay_store: &ReplayStore,
+    /// # ) -> Result<SignInOutcome, MyError> {
     /// client.sign_up_or_log_in_with_nonce_checker(identity_token, code, |candidate| async move {
     ///     match candidate {
     ///         Some(nonce) => Ok(nonce == expected_nonce),
@@ -805,6 +849,7 @@ impl<T: HttpTransport> AppleAuthClient<T, Strict> {
     ///         None => my_replay_store.check_and_record(identity_token).await,
     ///     }
     /// }, &accounts).await
+    /// # }
     /// ```
     pub async fn sign_up_or_log_in<A: AppleAccounts>(
         &self,

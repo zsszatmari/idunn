@@ -59,6 +59,8 @@ idunn = { path = ".", default-features = false, features = [
 ] }
 # gzip feature needed for test coverage
 reqwest = { version = "0.13", features = ["gzip"] }
+# The `with_refresh_loop` doctests compile against smol.
+smol = "2.0.2"
 tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
 
 [lints.rust]
