@@ -52,6 +52,16 @@ Every recipe that iterates feature combinations has to skip the zero- and two-ba
 
 `just check-powerset-full` runs the full feature powerset on every PR; `just check-powerset` covers only depth 2. That is 25 check combinations across the crate's 4 declared features (`aws_lc_rs`, `rust_crypto`, `test-fixtures`, `tokio-refresh`) — cheap enough that sampling a subset buys nothing. Revisit if the feature count grows past roughly 7, where the powerset's combinatorial growth would start to cost real CI time.
 
+## Why cargo-deny runs advisories a second time for `rust_crypto`
+
+`just cargo-deny` runs `cargo deny check` on the default graph (`aws_lc_rs`), then `cargo deny --no-default-features --features rust_crypto check`. The README offers `rust_crypto`, and its dependencies (`rsa`, `num-bigint-dig`, the pkcs crates) need the same advisory, license and ban checks as the default tree. cargo-deny reads `cargo metadata` and never compiles, so each run sees exactly the graph of one real build.
+
+The `RUSTSEC-2023-0071` ignore for `rsa` matches only in the `rust_crypto` run. The default run therefore prints `advisory-not-detected` for it on every invocation; the warning is expected there. `unused-ignored-advisory` stays at its default (`warn`), so the `rust_crypto` run reports the ignore as unmatched once it goes stale.
+
+Rejected: `all-features = true` in `deny.toml`. One run would cover both backends and the warning would disappear, but licenses and bans would run on a union graph that no real build has.
+
+Rejected: `unused-ignored-advisory = "allow"`. It would hide a stale ignore in the `rust_crypto` run too.
+
 ## Why docs.rs builds with `reqwest` and `tokio-refresh`
 
 docs.rs builds default features only, which would hide `ReqwestTransport`, `AppleAuthClient::new` and `AppleSeed::with_background_refresh`. `[package.metadata.docs.rs]` in `Cargo.toml` enables `reqwest` and `tokio-refresh`, and the `docs` CI job builds the same way through `just doc`, failing on any rustdoc warning.

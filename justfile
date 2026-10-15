@@ -70,6 +70,7 @@ coverage-ci min="90":
 
 cargo-deny:
     cargo deny check
+    cargo deny --no-default-features --features rust_crypto check
 
 cooldown:
     cargo cooldown metadata >/dev/null
